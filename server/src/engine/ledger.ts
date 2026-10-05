@@ -68,7 +68,7 @@ export interface NormalizedLine {
 }
 
 /** Validates an entry and converts amounts to integer cents (original + CAD base). Throws ValidationError. */
-export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: boolean } = {}): { lines: NormalizedLine[]; currency: string; fxRate: number } {
+export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: boolean; reversalOf?: number } = {}): { lines: NormalizedLine[]; currency: string; fxRate: number } {
   const errors: string[] = [];
   if (!isValidISODate(input.date)) errors.push('A valid date (YYYY-MM-DD) is required.');
   if (!input.description || !input.description.trim()) errors.push('A description is required.');
@@ -114,6 +114,32 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
     throw new ValidationError(
       `Entry does not balance: debits ${fromCents(od).toFixed(2)} ≠ credits ${fromCents(oc).toFixed(2)} (difference ${fromCents(od - oc).toFixed(2)}).`,
     );
+  }
+
+  if (!opts.reversalOf && input.source !== 'reversal') {
+    const sold = new Map<string, number>();
+    for (const l of lines) {
+      if (l.securityId && l.quantity && l.quantity < 0) {
+        const k = `${l.accountId}:${l.securityId}`;
+        sold.set(k, (sold.get(k) ?? 0) + l.quantity);
+      }
+    }
+    for (const [k, qty] of sold) {
+      const [accountId, secId] = k.split(':').map(Number);
+      const heldAt = (to: string) =>
+        (db
+          .prepare(
+            `SELECT COALESCE(SUM(l.quantity),0) AS q FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
+             WHERE e.user_id = ? AND l.account_id = ? AND l.security_id = ? AND e.date <= ?`,
+          )
+          .get(USER_ID, accountId, secId, to) as { q: number }).q;
+      const held = Math.min(heldAt(input.date), heldAt('9999-12-31'));
+      if (held + qty < -1e-9) {
+        const sym = (db.prepare('SELECT symbol FROM securities WHERE id = ?').get(secId) as { symbol: string } | undefined)?.symbol ?? 'security';
+        const acct = getAccount(db, accountId)?.name ?? 'account';
+        throw new ValidationError(`Cannot sell ${Math.abs(qty)} ${sym} from ${acct}: only ${Math.round(held * 1e8) / 1e8} held on ${input.date}. Short sales are not supported.`);
+      }
+    }
   }
 
   // FX rounding can leave a cent of difference in base currency; absorb it on the largest line.

@@ -125,6 +125,15 @@ describe('natural language → proposal (spec examples)', () => {
   });
 });
 
+describe('investment holdings guard', () => {
+  it('rejects selling more units than held', () => {
+    postEntry(db, propose('Bought 10 shares of XEQT for $300 in my TFSA from TD').entry);
+    const oversell = propose('Sold 10000 shares of XEQT at $40 from my TFSA into TD');
+    expect(() => postEntry(db, oversell.entry)).toThrow(/only 10 held/);
+    expect(() => postEntry(db, propose('Sold 4 shares of XEQT for $160 from my TFSA').entry)).not.toThrow();
+  });
+});
+
 describe('financial statements', () => {
   it('stay in balance with demo data', () => {
     const today = todayISO();
