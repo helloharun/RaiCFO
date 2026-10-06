@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { amt, type Account, type EntryInput, type LineInput, TYPE_LABELS } from '../api';
 import { AccountSelect } from './ui';
@@ -74,10 +75,10 @@ export default function EntryEditor({ entry, onChange, accounts, showHeader = tr
                   <AccountSelect accounts={accounts} value={l.accountId || null} onChange={(id) => setLine(i, { accountId: id ?? 0 })} />
                 </td>
                 <td>
-                  <input type="number" step="0.01" min="0" className="input text-right" value={l.debit || ''} onChange={(e) => setLine(i, { debit: Number(e.target.value), credit: e.target.value ? 0 : l.credit })} />
+                  <AmountInput value={l.debit} onChange={(v, raw) => setLine(i, { debit: v, credit: raw ? 0 : l.credit })} />
                 </td>
                 <td>
-                  <input type="number" step="0.01" min="0" className="input text-right" value={l.credit || ''} onChange={(e) => setLine(i, { credit: Number(e.target.value), debit: e.target.value ? 0 : l.debit })} />
+                  <AmountInput value={l.credit} onChange={(v, raw) => setLine(i, { credit: v, debit: raw ? 0 : l.debit })} />
                 </td>
                 {showInvest && (
                   <td>
@@ -117,5 +118,28 @@ export default function EntryEditor({ entry, onChange, accounts, showHeader = tr
         </table>
       </div>
     </div>
+  );
+}
+
+/** Keeps the typed text locally so partial values like "0." or "0.0" are not wiped while typing. */
+function AmountInput({ value, onChange }: { value?: number; onChange: (v: number, raw: string) => void }) {
+  const [text, setText] = useState(value ? String(value) : '');
+  useEffect(() => {
+    if ((Number(text) || 0) !== (value || 0)) setText(value ? String(value) : '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <input
+      type="number"
+      step="0.01"
+      min="0"
+      inputMode="decimal"
+      className="input text-right"
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        onChange(Number(e.target.value) || 0, e.target.value);
+      }}
+    />
   );
 }

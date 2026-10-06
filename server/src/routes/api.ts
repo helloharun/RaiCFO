@@ -369,17 +369,17 @@ export function apiRouter(db: DB) {
     if (!db.prepare('SELECT 1 FROM recurring_transactions WHERE id = ? AND user_id = ?').get(id(req), USER_ID)) throw new ValidationError('Not found.');
     return { id: upsertRecurring(db, { ...recurringInput(req.body ?? {}), id: id(req) }) };
   }));
-  r.post('/recurring/:id/:action', h((req) => {
-    if (!['pause', 'resume'].includes(String(req.params.action))) throw new ValidationError('Unknown action.');
-    db.prepare('UPDATE recurring_transactions SET is_active = ? WHERE id = ? AND user_id = ?').run(req.params.action === 'resume' ? 1 : 0, id(req), USER_ID);
-    audit(db, String(req.params.action), 'recurring', id(req));
-    return { ok: true };
-  }));
   r.post('/recurring/:id/post-now', h((req) => {
     const row = db.prepare('SELECT * FROM recurring_transactions WHERE id = ? AND user_id = ?').get(id(req), USER_ID) as RecurringRow | undefined;
     if (!row) throw new ValidationError('Not found.');
     const entryId = postRecurringOnce(db, row, dateQ(req.body?.date, row.next_date));
     return getEntry(db, entryId);
+  }));
+  r.post('/recurring/:id/:action', h((req) => {
+    if (!['pause', 'resume'].includes(String(req.params.action))) throw new ValidationError('Unknown action.');
+    db.prepare('UPDATE recurring_transactions SET is_active = ? WHERE id = ? AND user_id = ?').run(req.params.action === 'resume' ? 1 : 0, id(req), USER_ID);
+    audit(db, String(req.params.action), 'recurring', id(req));
+    return { ok: true };
   }));
   r.post('/recurring/run', h(() => ({ posted: runDueRecurring(db) })));
 

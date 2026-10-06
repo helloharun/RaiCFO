@@ -73,7 +73,7 @@ function ForecastView() {
           <div className="card overflow-hidden">
             <h2 className="border-b border-slate-100 px-4 py-3 font-semibold">Upcoming bills & income</h2>
             {data.events.length === 0 ? <Empty>No recurring transactions scheduled in this period.</Empty> : (
-              <table className="w-full text-sm">
+              <div className="overflow-x-auto"><table className="w-full min-w-[640px] text-sm">
                 <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="px-4 py-2">Date</th><th className="px-4 py-2">Description</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Accounts</th><th className="px-4 py-2 text-right">Cash effect</th></tr></thead>
                 <tbody>
                   {data.events.map((e, i) => (
@@ -86,7 +86,7 @@ function ForecastView() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             )}
           </div>
         </>
@@ -155,7 +155,7 @@ function DebtView() {
                 <button className="btn-secondary" onClick={saveTerms}>Save rates</button>
               </div>
             </div>
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto"><table className="w-full min-w-[520px] text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="px-4 py-2">Account</th><th className="px-4 py-2 text-right">Balance</th><th className="px-4 py-2">APR %</th><th className="px-4 py-2">Min payment</th></tr></thead>
               <tbody>
                 {plan.debts.map((d) => (
@@ -167,7 +167,7 @@ function DebtView() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </div>
           <div className="grid gap-3 md:grid-cols-3">
             {plan.results.map((r) => (

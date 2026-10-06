@@ -226,6 +226,20 @@ describe('hardening', () => {
     expect(backupPath({ backupDir: tmpDir } as never, '../test.db')).toBeNull();
   });
 
+  it('posts a recurring transaction on demand and still supports pause/resume', async () => {
+    const acct = (code: string) => (db.prepare('SELECT id FROM accounts WHERE code = ?').get(code) as { id: number }).id;
+    const created = await req('/api/recurring', { cookie: s.cookie, csrf: s.csrf, body: { description: 'Rent', frequency: 'monthly', nextDate: '2026-02-01', template: { lines: [{ accountId: acct('5010'), debit: 1500 }, { accountId: acct('1010'), credit: 1500 }] } } });
+    expect(created.res.status, created.text).toBe(200);
+    const rec = { id: created.json.id as number };
+    const before = (db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get() as { n: number }).n;
+    const r = await req(`/api/recurring/${rec!.id}/post-now`, { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-07' } });
+    expect(r.res.status, r.text).toBe(200);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get() as { n: number }).n).toBe(before + 1);
+    expect((await req(`/api/recurring/${rec!.id}/pause`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(200);
+    expect((await req(`/api/recurring/${rec!.id}/resume`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(200);
+    expect((await req(`/api/recurring/${rec!.id}/drop`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(400);
+  });
+
   it('runs integrity, goals, forecast and debt planning', async () => {
     const integ = await req('/api/integrity', { cookie: s.cookie });
     expect(integ.json.checks.find((c: { name: string }) => c.name === 'Trial balance').status).toBe('pass');
