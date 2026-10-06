@@ -235,6 +235,7 @@ describe('hardening', () => {
     const r = await req(`/api/recurring/${rec!.id}/post-now`, { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-07' } });
     expect(r.res.status, r.text).toBe(200);
     expect((db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get() as { n: number }).n).toBe(before + 1);
+    expect((db.prepare('SELECT next_date FROM recurring_transactions WHERE id = ?').get(rec.id) as { next_date: string }).next_date).toBe('2026-03-01');
     expect((await req(`/api/recurring/${rec!.id}/pause`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(200);
     expect((await req(`/api/recurring/${rec!.id}/resume`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(200);
     expect((await req(`/api/recurring/${rec!.id}/drop`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(400);

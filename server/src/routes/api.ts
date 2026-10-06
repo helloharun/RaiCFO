@@ -10,7 +10,7 @@ import {
 } from '../engine/reports.js';
 import { holdings } from '../engine/investments.js';
 import {
-  FREQUENCIES, type RecurringRow, budgetStatus, cancelReconciliation, commitCsv, completeReconciliation, postRecurringOnce, previewCsv,
+  FREQUENCIES, type RecurringRow, budgetStatus, cancelReconciliation, commitCsv, completeReconciliation, postRecurringOnce, postRecurringNow, previewCsv,
   reconciliationDetail, runDueRecurring, setBudget, startReconciliation, toggleCleared, upsertRecurring,
 } from '../engine/services.js';
 import { dashboard } from '../engine/analytics.js';
@@ -372,7 +372,7 @@ export function apiRouter(db: DB) {
   r.post('/recurring/:id/post-now', h((req) => {
     const row = db.prepare('SELECT * FROM recurring_transactions WHERE id = ? AND user_id = ?').get(id(req), USER_ID) as RecurringRow | undefined;
     if (!row) throw new ValidationError('Not found.');
-    const entryId = postRecurringOnce(db, row, dateQ(req.body?.date, row.next_date));
+    const entryId = postRecurringNow(db, row, dateQ(req.body?.date, row.next_date));
     return getEntry(db, entryId);
   }));
   r.post('/recurring/:id/:action', h((req) => {

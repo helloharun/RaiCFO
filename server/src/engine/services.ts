@@ -198,6 +198,17 @@ export function runDueRecurring(db: DB, today = todayISO()): number[] {
   return posted;
 }
 
+/** Posts the next scheduled occurrence immediately (optionally on another date) and advances the schedule. */
+export function postRecurringNow(db: DB, r: RecurringRow, date = r.next_date): number {
+  return db.transaction(() => {
+    const entryId = postRecurringOnce(db, r, date);
+    const next = nextOccurrence(r.next_date, r.frequency);
+    db.prepare('UPDATE recurring_transactions SET next_date = ?, is_active = ? WHERE id = ?').run(next, r.end_date && next > r.end_date ? 0 : r.is_active, r.id);
+    audit(db, 'post_now', 'recurring', r.id, { date, entryId, nextDate: next });
+    return entryId;
+  })();
+}
+
 export function postRecurringOnce(db: DB, r: RecurringRow, date: string): number {
   const tpl = JSON.parse(r.template) as Omit<EntryInput, 'date'>;
   return postEntry(db, { ...tpl, date, source: 'recurring', recurringId: r.id });
