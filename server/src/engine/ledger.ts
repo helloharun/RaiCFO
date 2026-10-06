@@ -4,8 +4,8 @@ import { type Account, type EntryInput, ValidationError, isDebitNormal } from '.
 
 export const USER_ID = 1;
 
-export function audit(db: DB, action: string, entity: string, entityId: number | null, details?: unknown): void {
-  db.prepare('INSERT INTO audit_log (user_id, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?)').run(
+export async function audit(db: DB, action: string, entity: string, entityId: number | null, details?: unknown): Promise<void> {
+  await db.prepare('INSERT INTO audit_log (user_id, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?)').run(
     USER_ID,
     action,
     entity,
@@ -14,46 +14,46 @@ export function audit(db: DB, action: string, entity: string, entityId: number |
   );
 }
 
-export function getSetting(db: DB, key: string): string | null {
-  const row = db.prepare('SELECT value FROM settings WHERE user_id = ? AND key = ?').get(USER_ID, key) as { value: string } | undefined;
+export async function getSetting(db: DB, key: string): Promise<string | null> {
+  const row = await db.prepare('SELECT value FROM settings WHERE user_id = ? AND key = ?').get(USER_ID, key) as { value: string } | undefined;
   return row?.value ?? null;
 }
 
-export function setSetting(db: DB, key: string, value: string | null): void {
-  db.prepare(
+export async function setSetting(db: DB, key: string, value: string | null): Promise<void> {
+  await db.prepare(
     'INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
   ).run(USER_ID, key, value);
 }
 
-export function listAccounts(db: DB, includeInactive = true): Account[] {
-  return db
+export async function listAccounts(db: DB, includeInactive = true): Promise<Account[]> {
+  return (await db
     .prepare(`SELECT * FROM accounts WHERE user_id = ? ${includeInactive ? '' : 'AND is_active = 1'} ORDER BY code`)
-    .all(USER_ID) as Account[];
+    .all(USER_ID)) as Account[];
 }
 
-export function getAccount(db: DB, id: number): Account | undefined {
-  return db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?').get(id, USER_ID) as Account | undefined;
+export async function getAccount(db: DB, id: number): Promise<Account | undefined> {
+  return await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?').get(id, USER_ID) as Account | undefined;
 }
 
-export function getAccountByCode(db: DB, code: string): Account | undefined {
-  return db.prepare('SELECT * FROM accounts WHERE code = ? AND user_id = ?').get(code, USER_ID) as Account | undefined;
+export async function getAccountByCode(db: DB, code: string): Promise<Account | undefined> {
+  return await db.prepare('SELECT * FROM accounts WHERE code = ? AND user_id = ?').get(code, USER_ID) as Account | undefined;
 }
 
-export function fxRate(db: DB, currency: string, date: string): number {
+export async function fxRate(db: DB, currency: string, date: string): Promise<number> {
   const cur = currency.toUpperCase();
   if (cur === BASE_CURRENCY) return 1;
-  const row = db
+  const row = (await db
     .prepare('SELECT rate FROM fx_rates WHERE currency = ? AND date <= ? ORDER BY date DESC LIMIT 1')
-    .get(cur, date) as { rate: number } | undefined;
+    .get(cur, date)) as { rate: number } | undefined;
   if (!row) throw new ValidationError(`No exchange rate configured for ${cur}. Add one in Settings.`);
   return row.rate;
 }
 
-function securityId(db: DB, symbol: string, currency: string): number {
+async function securityId(db: DB, symbol: string, currency: string): Promise<number> {
   const sym = symbol.trim().toUpperCase();
-  const row = db.prepare('SELECT id FROM securities WHERE user_id = ? AND symbol = ?').get(USER_ID, sym) as { id: number } | undefined;
+  const row = await db.prepare('SELECT id FROM securities WHERE user_id = ? AND symbol = ?').get(USER_ID, sym) as { id: number } | undefined;
   if (row) return row.id;
-  return Number(db.prepare('INSERT INTO securities (user_id, symbol, currency) VALUES (?, ?, ?)').run(USER_ID, sym, currency).lastInsertRowid);
+  return Number((await db.prepare('INSERT INTO securities (user_id, symbol, currency) VALUES (?, ?, ?)').run(USER_ID, sym, currency)).lastInsertRowid);
 }
 
 export interface NormalizedLine {
@@ -68,7 +68,7 @@ export interface NormalizedLine {
 }
 
 /** Validates an entry and converts amounts to integer cents (original + CAD base). Throws ValidationError. */
-export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: boolean; reversalOf?: number } = {}): { lines: NormalizedLine[]; currency: string; fxRate: number } {
+export async function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: boolean; reversalOf?: number } = {}): Promise<{ lines: NormalizedLine[]; currency: string; fxRate: number }> {
   const errors: string[] = [];
   if (!isValidISODate(input.date)) errors.push('A valid date (YYYY-MM-DD) is required.');
   if (!input.description || !input.description.trim()) errors.push('A description is required.');
@@ -83,17 +83,17 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
   if (input.fxRate !== undefined && input.fxRate !== null && !(Number.isFinite(Number(input.fxRate)) && Number(input.fxRate) >= 0 && Number(input.fxRate) < 1e6)) errors.push('Invalid exchange rate.');
   if (errors.length) throw new ValidationError(errors.join(' '), errors);
 
-  const lockDate = getSetting(db, 'lock_date');
+  const lockDate = await getSetting(db, 'lock_date');
   if (!opts.skipLock && lockDate && input.date <= lockDate) {
     throw new ValidationError(`The books are locked through ${lockDate}. Choose a later date or change the lock date in Settings.`);
   }
 
   const currency = (input.currency || BASE_CURRENCY).toUpperCase();
-  const rate = input.fxRate && input.fxRate > 0 ? input.fxRate : fxRate(db, currency, input.date);
+  const rate = input.fxRate && input.fxRate > 0 ? input.fxRate : (await fxRate(db, currency, input.date));
 
   const lines: NormalizedLine[] = [];
-  input.lines.forEach((l, i) => {
-    const acct = getAccount(db, Number(l.accountId));
+  for (const [i, l] of input.lines.entries()) {
+    const acct = await getAccount(db, Number(l.accountId));
     const od = toCents(Number(l.debit || 0));
     const oc = toCents(Number(l.credit || 0));
     if (!acct) errors.push(`Line ${i + 1}: account not found.`);
@@ -106,7 +106,7 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
     if (od > 0 && oc > 0) errors.push(`Line ${i + 1}: a line cannot have both a debit and a credit.`);
     if (od === 0 && oc === 0) errors.push(`Line ${i + 1}: a line needs a debit or a credit amount.`);
     let secId: number | null = l.securityId ?? null;
-    if (!secId && l.symbol && l.symbol.trim()) secId = securityId(db, l.symbol, currency);
+    if (!secId && l.symbol && l.symbol.trim()) secId = await securityId(db, l.symbol, currency);
     lines.push({
       accountId: Number(l.accountId),
       originalDebit: od,
@@ -117,7 +117,7 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
       securityId: secId,
       quantity: l.quantity === undefined || l.quantity === null || Number.isNaN(Number(l.quantity)) ? null : Number(l.quantity),
     });
-  });
+  }
   if (errors.length) throw new ValidationError(errors.join(' '), errors);
 
   const od = lines.reduce((s, l) => s + l.originalDebit, 0);
@@ -138,17 +138,17 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
     }
     for (const [k, qty] of sold) {
       const [accountId, secId] = k.split(':').map(Number);
-      const heldAt = (to: string) =>
-        (db
+      const heldAt = async (to: string) =>
+        ((await db
           .prepare(
             `SELECT COALESCE(SUM(l.quantity),0) AS q FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
              WHERE e.user_id = ? AND l.account_id = ? AND l.security_id = ? AND e.date <= ?`,
           )
-          .get(USER_ID, accountId, secId, to) as { q: number }).q;
-      const held = Math.min(heldAt(input.date), heldAt('9999-12-31'));
+          .get(USER_ID, accountId, secId, to)) as { q: number }).q;
+      const held = Math.min((await heldAt(input.date)), (await heldAt('9999-12-31')));
       if (held + qty < -1e-9) {
-        const sym = (db.prepare('SELECT symbol FROM securities WHERE id = ?').get(secId) as { symbol: string } | undefined)?.symbol ?? 'security';
-        const acct = getAccount(db, accountId)?.name ?? 'account';
+        const sym = (await db.prepare('SELECT symbol FROM securities WHERE id = ?').get(secId) as { symbol: string } | undefined)?.symbol ?? 'security';
+        const acct = (await getAccount(db, accountId))?.name ?? 'account';
         throw new ValidationError(`Cannot sell ${Math.abs(qty)} ${sym} from ${acct}: only ${Math.round(held * 1e8) / 1e8} held on ${input.date}. Short sales are not supported.`);
       }
     }
@@ -166,11 +166,11 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
   return { lines, currency, fxRate: rate };
 }
 
-export function postEntry(db: DB, input: EntryInput, opts: { skipLock?: boolean; reversalOf?: number } = {}): number {
-  const { lines, currency, fxRate: rate } = validateEntry(db, input, opts);
-  return db.transaction(() => {
+export async function postEntry(db: DB, input: EntryInput, opts: { skipLock?: boolean; reversalOf?: number } = {}): Promise<number> {
+  const { lines, currency, fxRate: rate } = await validateEntry(db, input, opts);
+  return db.transaction(async () => {
     const entryId = Number(
-      db
+      (await db
         .prepare(
           `INSERT INTO journal_entries (user_id, date, description, payee, memo, transaction_type, source, currency, fx_rate,
             raw_input, explanation, metadata, import_hash, reversal_of, recurring_id)
@@ -192,35 +192,36 @@ export function postEntry(db: DB, input: EntryInput, opts: { skipLock?: boolean;
           input.importHash ?? null,
           opts.reversalOf ?? null,
           input.recurringId ?? null,
-        ).lastInsertRowid,
+        )).lastInsertRowid,
     );
     const ins = db.prepare(
       `INSERT INTO journal_lines (entry_id, account_id, debit, credit, original_debit, original_credit, memo, security_id, quantity)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    for (const l of lines) ins.run(entryId, l.accountId, l.debit, l.credit, l.originalDebit, l.originalCredit, l.memo, l.securityId, l.quantity);
-    audit(db, opts.reversalOf ? 'reverse' : 'post', 'journal_entry', entryId, {
+    for (const l of lines) await ins.run(entryId, l.accountId, l.debit, l.credit, l.originalDebit, l.originalCredit, l.memo, l.securityId, l.quantity);
+    await audit(db, opts.reversalOf ? 'reverse' : 'post', 'journal_entry', entryId, {
       date: input.date,
       description: input.description,
       source: input.source ?? 'manual',
       lines: lines.map((l) => ({ accountId: l.accountId, debit: l.debit, credit: l.credit })),
     });
-    learnMerchantRule(db, input, lines);
+    await learnMerchantRule(db, input, lines);
     return entryId;
   })();
 }
 
-function learnMerchantRule(db: DB, input: EntryInput, lines: NormalizedLine[]): void {
+async function learnMerchantRule(db: DB, input: EntryInput, lines: NormalizedLine[]): Promise<void> {
   const payee = input.payee?.trim().toLowerCase();
   if (!payee || payee.length < 3 || input.source === 'opening' || input.source === 'reversal') return;
-  const categoryLines = lines.filter((l) => {
-    const a = getAccount(db, l.accountId);
-    return a && (a.type === 'expense' || a.type === 'income');
-  });
+  const categoryLines: NormalizedLine[] = [];
+  for (const l of lines) {
+    const a = await getAccount(db, l.accountId);
+    if (a && (a.type === 'expense' || a.type === 'income')) categoryLines.push(l);
+  }
   if (categoryLines.length !== 1) return;
-  db.prepare(
+  await db.prepare(
     `INSERT INTO merchant_rules (user_id, pattern, account_id) VALUES (?, ?, ?)
-     ON CONFLICT(user_id, pattern) DO UPDATE SET account_id = excluded.account_id, hits = hits + 1`,
+     ON CONFLICT(user_id, pattern) DO UPDATE SET account_id = excluded.account_id, hits = merchant_rules.hits + 1`,
   ).run(USER_ID, payee, categoryLines[0].accountId);
 }
 
@@ -259,23 +260,23 @@ export interface EntryWithLines {
   }>;
 }
 
-export function getEntry(db: DB, id: number): EntryWithLines | undefined {
-  const e = db.prepare('SELECT * FROM journal_entries WHERE id = ? AND user_id = ?').get(id, USER_ID) as EntryWithLines | undefined;
+export async function getEntry(db: DB, id: number): Promise<EntryWithLines | undefined> {
+  const e = await db.prepare('SELECT * FROM journal_entries WHERE id = ? AND user_id = ?').get(id, USER_ID) as EntryWithLines | undefined;
   if (!e) return undefined;
-  e.lines = linesFor(db, [id]).get(id) ?? [];
+  e.lines = (await linesFor(db, [id])).get(id) ?? [];
   return e;
 }
 
-function linesFor(db: DB, ids: number[]): Map<number, EntryWithLines['lines']> {
+async function linesFor(db: DB, ids: number[]): Promise<Map<number, EntryWithLines['lines']>> {
   const map = new Map<number, EntryWithLines['lines']>();
   if (!ids.length) return map;
-  const rows = db
+  const rows = (await db
     .prepare(
       `SELECT l.*, a.name AS account_name, a.code AS account_code, a.type AS account_type, s.symbol
        FROM journal_lines l JOIN accounts a ON a.id = l.account_id LEFT JOIN securities s ON s.id = l.security_id
        WHERE l.entry_id IN (${ids.map(() => '?').join(',')}) ORDER BY l.entry_id, (l.debit = 0), l.id`,
     )
-    .all(...ids) as Array<EntryWithLines['lines'][number] & { entry_id: number }>;
+    .all(...ids)) as Array<EntryWithLines['lines'][number] & { entry_id: number }>;
   for (const r of rows) {
     if (!map.has(r.entry_id)) map.set(r.entry_id, []);
     map.get(r.entry_id)!.push(r);
@@ -293,7 +294,7 @@ export interface EntryFilter {
   offset?: number;
 }
 
-export function listEntries(db: DB, f: EntryFilter = {}): { entries: EntryWithLines[]; total: number } {
+export async function listEntries(db: DB, f: EntryFilter = {}): Promise<{ entries: EntryWithLines[]; total: number }> {
   const where = ['e.user_id = ?'];
   const params: unknown[] = [USER_ID];
   if (f.from) (where.push('e.date >= ?'), params.push(f.from));
@@ -301,29 +302,29 @@ export function listEntries(db: DB, f: EntryFilter = {}): { entries: EntryWithLi
   if (f.type) (where.push('e.transaction_type = ?'), params.push(f.type));
   if (f.accountId) (where.push('EXISTS (SELECT 1 FROM journal_lines x WHERE x.entry_id = e.id AND x.account_id = ?)'), params.push(f.accountId));
   if (f.search) {
-    where.push('(e.description LIKE ? OR e.payee LIKE ? OR e.memo LIKE ? OR e.raw_input LIKE ?)');
+    where.push('(e.description ILIKE ? OR e.payee ILIKE ? OR e.memo ILIKE ? OR e.raw_input ILIKE ?)');
     const s = `%${f.search}%`;
     params.push(s, s, s, s);
   }
   const w = where.join(' AND ');
-  const total = (db.prepare(`SELECT COUNT(*) AS n FROM journal_entries e WHERE ${w}`).get(...params) as { n: number }).n;
-  const rows = db
+  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM journal_entries e WHERE ${w}`).get(...params) as { n: number }).n;
+  const rows = (await db
     .prepare(`SELECT e.* FROM journal_entries e WHERE ${w} ORDER BY e.date DESC, e.id DESC LIMIT ? OFFSET ?`)
-    .all(...params, f.limit ?? 100, f.offset ?? 0) as EntryWithLines[];
-  const lines = linesFor(db, rows.map((r) => r.id));
+    .all(...params, f.limit ?? 100, f.offset ?? 0)) as EntryWithLines[];
+  const lines = await linesFor(db, rows.map((r) => r.id));
   rows.forEach((r) => (r.lines = lines.get(r.id) ?? []));
   return { entries: rows, total };
 }
 
 /** Reverses (voids) an entry by posting an equal-and-opposite entry. Posted entries are never deleted. */
-export function reverseEntry(db: DB, id: number, opts: { date?: string; reason?: string } = {}): number {
-  const e = getEntry(db, id);
+export async function reverseEntry(db: DB, id: number, opts: { date?: string; reason?: string } = {}): Promise<number> {
+  const e = await getEntry(db, id);
   if (!e) throw new ValidationError('Entry not found.');
   if (e.reversed_by) throw new ValidationError('This entry has already been reversed.');
   if (e.reversal_of) throw new ValidationError('A reversal entry cannot itself be reversed. Post a new entry instead.');
   const date = opts.date ?? e.date;
-  return db.transaction(() => {
-    const revId = postEntry(
+  return db.transaction(async () => {
+    const revId = await postEntry(
       db,
       {
         date,
@@ -345,7 +346,7 @@ export function reverseEntry(db: DB, id: number, opts: { date?: string; reason?:
       },
       { reversalOf: e.id },
     );
-    db.prepare('UPDATE journal_entries SET reversed_by = ? WHERE id = ?').run(revId, e.id);
+    await db.prepare('UPDATE journal_entries SET reversed_by = ? WHERE id = ?').run(revId, e.id);
     return revId;
   })();
 }
@@ -360,19 +361,19 @@ export interface Balance {
 }
 
 /** Account balances (CAD cents) from the ledger, optionally limited to a date window. */
-export function accountBalances(db: DB, opts: { from?: string; to?: string } = {}): Map<number, Balance> {
+export async function accountBalances(db: DB, opts: { from?: string; to?: string } = {}): Promise<Map<number, Balance>> {
   const where = ['e.user_id = ?'];
   const params: unknown[] = [USER_ID];
   if (opts.from) (where.push('e.date >= ?'), params.push(opts.from));
   if (opts.to) (where.push('e.date <= ?'), params.push(opts.to));
-  const rows = db
+  const rows = (await db
     .prepare(
       `SELECT a.id, a.type, a.currency, COALESCE(SUM(l.debit),0) AS debit, COALESCE(SUM(l.credit),0) AS credit,
          COALESCE(SUM(CASE WHEN e.currency = a.currency THEN l.original_debit - l.original_credit ELSE (l.debit - l.credit) END),0) AS native
        FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id JOIN accounts a ON a.id = l.account_id
        WHERE ${where.join(' AND ')} GROUP BY a.id`,
     )
-    .all(...params) as Array<{ id: number; type: Account['type']; currency: string; debit: number; credit: number; native: number }>;
+    .all(...params)) as Array<{ id: number; type: Account['type']; currency: string; debit: number; credit: number; native: number }>;
   const map = new Map<number, Balance>();
   for (const r of rows) {
     const sign = isDebitNormal(r.type) ? 1 : -1;
@@ -381,6 +382,6 @@ export function accountBalances(db: DB, opts: { from?: string; to?: string } = {
   return map;
 }
 
-export function balanceOf(db: DB, accountId: number, to?: string): number {
-  return accountBalances(db, { to }).get(accountId)?.balance ?? 0;
+export async function balanceOf(db: DB, accountId: number, to?: string): Promise<number> {
+  return (await accountBalances(db, { to })).get(accountId)?.balance ?? 0;
 }

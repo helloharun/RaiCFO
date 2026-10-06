@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import type { DbOptions } from './db.js';
 
 const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -34,7 +35,13 @@ const schema = z
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     HOST: z.string().default('127.0.0.1'),
     PORT: int(4000, 1, 65535),
-    DB_PATH: opt,
+    DATABASE_URL: z
+      .string({ error: 'DATABASE_URL is required (postgres://user:password@host:5432/db, e.g. your Supabase connection string)' })
+      .refine((v) => /^postgres(ql)?:\/\//.test(v.trim()), 'DATABASE_URL must be a postgres:// or postgresql:// connection string')
+      .transform((v) => v.trim()),
+    DATABASE_SSL: z.enum(['auto', 'disable', 'require', 'verify-full']).default('auto'),
+    DATABASE_CA_CERT: opt,
+    DATABASE_POOL_MAX: int(5, 1, 50),
     TRUST_PROXY: z.string().optional().default(''),
     CORS_ORIGINS: z.string().optional().default(''),
 
@@ -59,9 +66,6 @@ const schema = z
     LLM_BASE_URL: opt,
     LLM_TIMEOUT_SECONDS: int(30, 5, 300),
 
-    BACKUP_DIR: opt,
-    BACKUP_INTERVAL_HOURS: int(24, 0, 24 * 30),
-    BACKUP_RETENTION: int(30, 1, 1000),
     BACKUP_ENCRYPTION_KEY: opt,
     ALLOW_DEMO_DATA: bool(true),
   })
@@ -72,6 +76,8 @@ const schema = z
       ctx.addIssue({ code: 'custom', path: ['APP_PASSWORD_HASH'], message: 'APP_PASSWORD_HASH is not a valid scrypt hash (use npm run hash-password -w server)' });
     if (c.APP_PASSWORD && c.APP_PASSWORD.length < 12)
       ctx.addIssue({ code: 'custom', path: ['APP_PASSWORD'], message: 'APP_PASSWORD must be at least 12 characters' });
+    if (c.DATABASE_SSL === 'verify-full' && !c.DATABASE_CA_CERT)
+      ctx.addIssue({ code: 'custom', path: ['DATABASE_CA_CERT'], message: 'DATABASE_SSL=verify-full requires DATABASE_CA_CERT (PEM text of the server CA certificate)' });
     if (c.BACKUP_ENCRYPTION_KEY && c.BACKUP_ENCRYPTION_KEY.length < 32)
       ctx.addIssue({ code: 'custom', path: ['BACKUP_ENCRYPTION_KEY'], message: 'BACKUP_ENCRYPTION_KEY must be at least 32 characters' });
     if (/change[-_ ]?me|example|placeholder/i.test(c.SESSION_SECRET))
@@ -79,8 +85,6 @@ const schema = z
   });
 
 export type AppConfig = z.output<typeof schema> & {
-  dbPath: string;
-  backupDir: string;
   cookieSecure: boolean;
   trustProxy: boolean | number | string;
   corsOrigins: string[];
@@ -95,12 +99,9 @@ export function parseConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new ConfigError(`Invalid configuration in server/.env:\n${msg}\nSee server/.env.example.`);
   }
   const c = res.data;
-  const dbPath = c.DB_PATH ?? path.join(serverRoot, 'data', 'finance.db');
   const tp = c.TRUST_PROXY.trim();
   return {
     ...c,
-    dbPath: dbPath === ':memory:' ? dbPath : path.resolve(serverRoot, dbPath),
-    backupDir: path.resolve(serverRoot, c.BACKUP_DIR ?? path.join(path.dirname(path.resolve(serverRoot, dbPath === ':memory:' ? 'data/x' : dbPath)), 'backups')),
     cookieSecure: c.COOKIE_SECURE === 'auto' ? c.NODE_ENV === 'production' : c.COOKIE_SECURE === 'true',
     trustProxy: tp === '' || tp === 'false' ? false : tp === 'true' ? true : /^\d+$/.test(tp) ? Number(tp) : tp,
     corsOrigins: c.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean),
@@ -114,4 +115,15 @@ export function setConfig(c: AppConfig) {
 /** Returns the active config, or null when running outside the server (e.g. unit tests / scripts). */
 export function getConfig(): AppConfig | null {
   return current;
+}
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+/** Connection options for the Postgres pool. TLS is on by default for any non-local host (e.g. Supabase). */
+export function dbOptions(c: Pick<AppConfig, 'DATABASE_URL' | 'DATABASE_SSL' | 'DATABASE_CA_CERT' | 'DATABASE_POOL_MAX'>, schema?: string): DbOptions {
+  const host = new URL(c.DATABASE_URL).hostname;
+  const mode = c.DATABASE_SSL === 'auto' ? (LOCAL_HOSTS.has(host) ? 'disable' : 'require') : c.DATABASE_SSL;
+  const ssl: DbOptions['ssl'] =
+    mode === 'disable' ? false : mode === 'require' ? 'require' : { rejectUnauthorized: true, ca: c.DATABASE_CA_CERT!.replace(/\\n/g, '\n') };
+  return { url: c.DATABASE_URL, ssl, max: c.DATABASE_POOL_MAX, schema };
 }

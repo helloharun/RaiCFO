@@ -78,25 +78,24 @@ export const DEFAULT_FX: Array<[string, number]> = [
 
 const SYSTEM_CODES = new Set(['3000', '3100', '3200', '3300', '4500']);
 
-export function seedIfEmpty(db: DB): void {
-  const hasUser = db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
-  if (hasUser.n === 0) db.prepare("INSERT INTO users (id, name, base_currency) VALUES (1, 'Me', 'CAD')").run();
+export async function seedIfEmpty(db: DB): Promise<void> {
+  const hasUser = await db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
+  if (hasUser.n === 0) await db.prepare("INSERT INTO users (id, name, base_currency) VALUES (1, 'Me', 'CAD')").run();
 
-  const n = (db.prepare('SELECT COUNT(*) AS n FROM accounts WHERE user_id = 1').get() as { n: number }).n;
+  const n = (await db.prepare('SELECT COUNT(*) AS n FROM accounts WHERE user_id = 1').get() as { n: number }).n;
   if (n === 0) {
     const ins = db.prepare(
       'INSERT INTO accounts (user_id, code, name, type, subtype, aliases, institution, sort_order, is_system) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)',
     );
-    db.transaction(() => {
-      DEFAULT_ACCOUNTS.forEach(([code, name, type, subtype, aliases, institution], i) =>
-        ins.run(code, name, type, subtype, aliases ?? null, institution ?? null, i, SYSTEM_CODES.has(code) ? 1 : 0),
-      );
+    await db.transaction(async () => {
+      for (const [i, [code, name, type, subtype, aliases, institution]] of DEFAULT_ACCOUNTS.entries())
+        await ins.run(code, name, type, subtype, aliases ?? null, institution ?? null, i, SYSTEM_CODES.has(code) ? 1 : 0);
     })();
   }
 
-  const fx = (db.prepare('SELECT COUNT(*) AS n FROM fx_rates').get() as { n: number }).n;
+  const fx = (await db.prepare('SELECT COUNT(*) AS n FROM fx_rates').get() as { n: number }).n;
   if (fx === 0) {
     const ins = db.prepare("INSERT INTO fx_rates (currency, date, rate) VALUES (?, '1970-01-01', ?)");
-    DEFAULT_FX.forEach(([c, r]) => ins.run(c, r));
+    for (const [c, r] of DEFAULT_FX) await ins.run(c, r);
   }
 }

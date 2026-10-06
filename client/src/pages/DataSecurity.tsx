@@ -4,10 +4,8 @@ import { api, download, today, yearStart } from '../api';
 import { ErrorBox, Notice, PageHeader, useApi } from '../components/ui';
 
 interface Integrity { status: 'pass' | 'warn' | 'fail'; checkedAt: string; checks: Array<{ name: string; status: 'pass' | 'warn' | 'fail'; detail: string }> }
-interface Backups { encrypted: boolean; intervalHours: number; retention: number; backups: Array<{ name: string; size: number; createdAt: string; encrypted: boolean }> }
+interface Backups { encrypted: boolean; format: string }
 interface SessionRow { current: boolean; createdAt: number; lastSeen: number; expiresAt: number; ip: string | null; userAgent: string | null }
-
-const size = (n: number) => (n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
 
 export default function DataSecurity() {
   const integrity = useApi<Integrity>('/integrity');
@@ -35,13 +33,13 @@ export default function DataSecurity() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Data & Security" subtitle="Download your ledger, manage backups, verify the integrity of your books and review active sessions." />
+      <PageHeader title="Data & Security" subtitle="Download your ledger and backups, verify the integrity of your books and review active sessions." />
       <ErrorBox error={error} onClose={() => setError(null)} />
       {ok && <Notice tone="success">{ok}</Notice>}
 
       <div className="card p-5">
         <h2 className="mb-1 font-semibold">Download ledger data</h2>
-        <p className="mb-4 text-sm text-slate-500">CSV files open in Excel, Numbers or Google Sheets. The JSON export and the SQLite database contain everything and can be kept as an offline archive.</p>
+        <p className="mb-4 text-sm text-slate-500">CSV files open in Excel, Numbers or Google Sheets. The JSON export contains everything (with reports) and can be kept as an offline archive.</p>
         <div className="mb-4 flex flex-wrap items-end gap-3">
           <div><label className="label">From</label><input type="date" className="input" value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} /></div>
           <div><label className="label">To / as of</label><input type="date" className="input" value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} /></div>
@@ -52,8 +50,7 @@ export default function DataSecurity() {
           <button className="btn-secondary" onClick={() => dl(`/export/trial-balance.csv?asOf=${range.to}`)}><Download size={15} /> Trial balance (CSV)</button>
           <button className="btn-secondary" onClick={() => dl('/export/accounts.csv')}><Download size={15} /> Chart of accounts (CSV)</button>
           <button className="btn-secondary" onClick={() => dl('/export/ledger.json')}><Download size={15} /> Full ledger (JSON)</button>
-          <button className="btn-secondary" onClick={() => dl('/export/database.sqlite')}><HardDriveDownload size={15} /> Database file (SQLite)</button>
-        </div>
+                  </div>
       </div>
 
       <div className="card p-5">
@@ -78,33 +75,18 @@ export default function DataSecurity() {
       </div>
 
       <div className="card p-5">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="font-semibold">Backups</h2>
-            {backups.data && (
-              <p className="text-xs text-slate-500">
-                {backups.data.intervalHours ? `Automatic every ${backups.data.intervalHours}h` : 'Automatic backups disabled'} · keeps {backups.data.retention} · {backups.data.encrypted ? 'AES-256-GCM encrypted' : 'not encrypted (set BACKUP_ENCRYPTION_KEY)'}
-              </p>
-            )}
-          </div>
-          <button className="btn-primary" disabled={busy} onClick={() => act(async () => { const b = await api<{ name: string }>('/backups', { method: 'POST' }); backups.reload(); return `Backup ${b.name} created.`; })}>Back up now</button>
+        <h2 className="font-semibold">Backups</h2>
+        <p className="mb-3 text-xs text-slate-500">
+          Your ledger lives in your Postgres database (e.g. Supabase, which also keeps its own backups). Download a complete, restorable copy regularly and keep it somewhere safe.
+          {backups.data && (backups.data.encrypted ? ' Encrypted backups use AES-256-GCM with your BACKUP_ENCRYPTION_KEY.' : ' Set BACKUP_ENCRYPTION_KEY to enable encrypted backups.')}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-primary" onClick={() => dl('/export/backup.json')}><HardDriveDownload size={15} /> Download full backup (JSON)</button>
+          {backups.data?.encrypted && (
+            <button className="btn-secondary" onClick={() => dl('/export/backup.json.enc')}><HardDriveDownload size={15} /> Download encrypted backup</button>
+          )}
         </div>
-        {backups.data?.backups.length ? (
-          <table className="w-full text-sm">
-            <thead className="text-left text-xs uppercase text-slate-500"><tr><th className="py-1">File</th><th>Created</th><th>Size</th><th /></tr></thead>
-            <tbody>
-              {backups.data.backups.map((b) => (
-                <tr key={b.name} className="border-t border-slate-100">
-                  <td className="py-1.5 font-mono text-xs">{b.name}</td>
-                  <td className="text-xs">{new Date(b.createdAt).toLocaleString()}</td>
-                  <td className="text-xs">{size(b.size)}</td>
-                  <td className="text-right"><button className="btn-ghost px-2 py-1" onClick={() => dl(`/backups/${encodeURIComponent(b.name)}/download`)} aria-label={`Download ${b.name}`}><Download size={14} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : <p className="text-sm text-slate-500">No backups yet.</p>}
-        <p className="mt-3 text-xs text-slate-500">To restore, stop the server and run <code>npm run restore -w server -- &lt;backup file&gt;</code>. The current database is kept as a safety copy.</p>
+        <p className="mt-3 text-xs text-slate-500">To restore into a new, empty database: point <code>DATABASE_URL</code> at it and run <code>npm run restore -w server -- &lt;backup file&gt;</code>.</p>
       </div>
 
       <div className="card p-5">

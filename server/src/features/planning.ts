@@ -28,13 +28,13 @@ function monthsBetween(from: string, to: string) {
   return (ty - fy) * 12 + (tm - fm) + (td - fd) / 30;
 }
 
-function goalProgress(db: DB, g: GoalRow, today: string) {
+async function goalProgress(db: DB, g: GoalRow, today: string) {
   const ids: number[] = g.account_ids ? JSON.parse(g.account_ids) : [];
-  const balNow = accountBalances(db, { to: today });
-  const bal3 = accountBalances(db, { to: addMonths(today, -3) });
-  const sum = (m: typeof balNow) => {
+  const balNow = await accountBalances(db, { to: today });
+  const bal3 = await accountBalances(db, { to: addMonths(today, -3) });
+  const sum = async (m: typeof balNow) => {
     if (g.kind === 'net_worth') {
-      return listAccounts(db).reduce((s, a) => s + (a.type === 'asset' ? 1 : a.type === 'liability' ? -1 : 0) * (m.get(a.id)?.balance ?? 0), 0);
+      return (await listAccounts(db)).reduce((s, a) => s + (a.type === 'asset' ? 1 : a.type === 'liability' ? -1 : 0) * (m.get(a.id)?.balance ?? 0), 0);
     }
     return ids.reduce((s, id) => s + (m.get(id)?.balance ?? 0), 0);
   };
@@ -42,12 +42,12 @@ function goalProgress(db: DB, g: GoalRow, today: string) {
   let past: number;
   if (g.kind === 'debt_payoff') {
     // progress = how much of the starting debt (target) has been paid down
-    const owed = sum(balNow);
+    const owed = await sum(balNow);
     current = Math.max(0, g.target_amount - owed);
-    past = Math.max(0, g.target_amount - sum(bal3));
+    past = Math.max(0, g.target_amount - (await sum(bal3)));
   } else if (ids.length || g.kind === 'net_worth') {
-    current = sum(balNow);
-    past = sum(bal3);
+    current = await sum(balNow);
+    past = await sum(bal3);
   } else {
     current = g.manual_amount;
     past = g.manual_amount;
@@ -80,12 +80,14 @@ function goalProgress(db: DB, g: GoalRow, today: string) {
   };
 }
 
-export function listGoals(db: DB, today = todayISO()) {
-  const rows = db.prepare('SELECT * FROM goals WHERE user_id = ? ORDER BY is_archived, COALESCE(target_date, \'9999\'), id').all(USER_ID) as GoalRow[];
-  return rows.map((g) => goalProgress(db, g, today));
+export async function listGoals(db: DB, today = todayISO()) {
+  const rows = await db.prepare('SELECT * FROM goals WHERE user_id = ? ORDER BY is_archived, COALESCE(target_date, \'9999\'), id').all(USER_ID) as GoalRow[];
+  const out = [];
+  for (const g of rows) out.push(await goalProgress(db, g, today));
+  return out;
 }
 
-export function upsertGoal(db: DB, b: Record<string, unknown>, id?: number) {
+export async function upsertGoal(db: DB, b: Record<string, unknown>, id?: number) {
   const name = String(b.name ?? '').trim().slice(0, 120);
   if (!name) throw new ValidationError('Goal name is required.');
   const kind = String(b.kind ?? 'savings');
@@ -95,33 +97,33 @@ export function upsertGoal(db: DB, b: Record<string, unknown>, id?: number) {
   const targetDate = b.targetDate ? String(b.targetDate) : null;
   if (targetDate && !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) throw new ValidationError('Invalid target date.');
   const accountIds = Array.isArray(b.accountIds) ? [...new Set(b.accountIds.map(Number))].filter((x) => Number.isInteger(x) && x > 0).slice(0, 50) : [];
-  for (const a of accountIds) if (!getAccount(db, a)) throw new ValidationError('Linked account not found.');
+  for (const a of accountIds) if (!(await getAccount(db, a))) throw new ValidationError('Linked account not found.');
   const manual = Number(b.manualAmount ?? 0);
   if (!Number.isFinite(manual) || manual < 0 || manual > 1e11) throw new ValidationError('Invalid current amount.');
   const notes = b.notes ? String(b.notes).slice(0, 1000) : null;
   const vals = [name, kind, Math.round(target * 100), targetDate, accountIds.length ? JSON.stringify(accountIds) : null, Math.round(manual * 100), notes, b.isArchived ? 1 : 0];
   if (id) {
-    const r = db.prepare('UPDATE goals SET name = ?, kind = ?, target_amount = ?, target_date = ?, account_ids = ?, manual_amount = ?, notes = ?, is_archived = ? WHERE id = ? AND user_id = ?').run(...vals, id, USER_ID);
+    const r = await db.prepare('UPDATE goals SET name = ?, kind = ?, target_amount = ?, target_date = ?, account_ids = ?, manual_amount = ?, notes = ?, is_archived = ? WHERE id = ? AND user_id = ?').run(...vals, id, USER_ID);
     if (!r.changes) throw new ValidationError('Goal not found.');
-    audit(db, 'update', 'goal', id, { name, kind, target });
+    await audit(db, 'update', 'goal', id, { name, kind, target });
     return id;
   }
-  const newId = Number(db.prepare('INSERT INTO goals (name, kind, target_amount, target_date, account_ids, manual_amount, notes, is_archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(...vals).lastInsertRowid);
-  audit(db, 'create', 'goal', newId, { name, kind, target });
+  const newId = Number((await db.prepare('INSERT INTO goals (name, kind, target_amount, target_date, account_ids, manual_amount, notes, is_archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(...vals)).lastInsertRowid);
+  await audit(db, 'create', 'goal', newId, { name, kind, target });
   return newId;
 }
 
-export function deleteGoal(db: DB, id: number) {
-  const r = db.prepare('DELETE FROM goals WHERE id = ? AND user_id = ?').run(id, USER_ID);
+export async function deleteGoal(db: DB, id: number) {
+  const r = await db.prepare('DELETE FROM goals WHERE id = ? AND user_id = ?').run(id, USER_ID);
   if (!r.changes) throw new ValidationError('Goal not found.');
-  audit(db, 'delete', 'goal', id);
+  await audit(db, 'delete', 'goal', id);
 }
 
 /* ---------------- Financial health ---------------- */
 
-export function financialHealth(db: DB, today = todayISO()) {
-  const accts = listAccounts(db);
-  const bal = accountBalances(db, { to: today });
+export async function financialHealth(db: DB, today = todayISO()) {
+  const accts = await listAccounts(db);
+  const bal = await accountBalances(db, { to: today });
   const b = (pred: (a: (typeof accts)[number]) => boolean) => accts.filter(pred).reduce((s, a) => s + (bal.get(a.id)?.balance ?? 0), 0);
   const liquid = b((a) => a.type === 'asset' && CASH_SUBTYPES.includes(a.subtype));
   const assets = b((a) => a.type === 'asset');
@@ -129,7 +131,7 @@ export function financialHealth(db: DB, today = todayISO()) {
   const cardDebt = b((a) => a.type === 'liability' && a.subtype === 'credit_card');
   const from = addMonths(monthStart(today), -3);
   const to = addDays(monthStart(today), -1);
-  const period = accountBalances(db, { from, to });
+  const period = await accountBalances(db, { from, to });
   const p = (type: string) => accts.filter((a) => a.type === type).reduce((s, a) => s + (period.get(a.id)?.balance ?? 0), 0);
   const income3 = p('income');
   const expense3 = p('expense');
@@ -149,15 +151,15 @@ export function financialHealth(db: DB, today = todayISO()) {
 
 /* ---------------- Cash-flow forecast & upcoming bills ---------------- */
 
-export function forecast(db: DB, days = 60, today = todayISO()) {
+export async function forecast(db: DB, days = 60, today = todayISO()) {
   if (!Number.isInteger(days) || days < 1 || days > 366) throw new ValidationError('Days must be between 1 and 366.');
   const end = addDays(today, days);
-  const accts = listAccounts(db);
+  const accts = await listAccounts(db);
   const byId = new Map(accts.map((a) => [a.id, a]));
   const liquidIds = new Set(accts.filter((a) => a.type === 'asset' && CASH_SUBTYPES.includes(a.subtype)).map((a) => a.id));
-  const bal = accountBalances(db, { to: today });
+  const bal = await accountBalances(db, { to: today });
   const startBalance = [...liquidIds].reduce((s, id) => s + (bal.get(id)?.balance ?? 0), 0);
-  const recurring = db.prepare('SELECT * FROM recurring_transactions WHERE user_id = ? AND is_active = 1').all(USER_ID) as RecurringRow[];
+  const recurring = await db.prepare('SELECT * FROM recurring_transactions WHERE user_id = ? AND is_active = 1').all(USER_ID) as RecurringRow[];
   const events: Array<{ date: string; recurringId: number; description: string; frequency: string; amount: number; cashEffect: number; kind: 'bill' | 'income' | 'transfer'; accounts: string[] }> = [];
   for (const r of recurring) {
     const tpl = JSON.parse(r.template) as Omit<EntryInput, 'date'>;
@@ -249,11 +251,11 @@ function simulate(debts: Debt[], strategy: 'avalanche' | 'snowball' | 'minimum',
   return { strategy, months: done ? month : null, totalInterest: done ? totalInterest : null, payoffNever: !done, debts: ds.map((d) => ({ accountId: d.accountId, name: d.name, paidOffMonth: d.paidOffMonth, interest: d.interest })), timeline };
 }
 
-export function debtPlan(db: DB, opts: { extraMonthly?: number; overrides?: Record<string, { apr?: number; minPayment?: number }> } = {}, today = todayISO()) {
+export async function debtPlan(db: DB, opts: { extraMonthly?: number; overrides?: Record<string, { apr?: number; minPayment?: number }> } = {}, today = todayISO()) {
   const extra = Math.round(Number(opts.extraMonthly ?? 0) * 100);
   if (!Number.isFinite(extra) || extra < 0 || extra > 1e10) throw new ValidationError('Extra payment must be zero or more.');
-  const bal = accountBalances(db, { to: today });
-  const debts: Debt[] = listAccounts(db, false)
+  const bal = await accountBalances(db, { to: today });
+  const debts: Debt[] = (await listAccounts(db, false))
     .filter((a) => a.type === 'liability' && (bal.get(a.id)?.balance ?? 0) > 0)
     .map((a) => {
       const o = opts.overrides?.[String(a.id)] ?? {};

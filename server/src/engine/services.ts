@@ -7,23 +7,23 @@ import { USER_ID, accountBalances, audit, getAccount, listAccounts, postEntry } 
 
 /* ---------------- Budgets ---------------- */
 
-export function setBudget(db: DB, accountId: number, month: string, amount: number): void {
-  const a = getAccount(db, accountId);
+export async function setBudget(db: DB, accountId: number, month: string, amount: number): Promise<void> {
+  const a = await getAccount(db, accountId);
   if (!a || a.type !== 'expense') throw new ValidationError('Budgets can only be set on expense accounts.');
   if (month !== '*' && !/^\d{4}-\d{2}$/.test(month)) throw new ValidationError('Month must be YYYY-MM or * (default).');
-  if (!amount) db.prepare('DELETE FROM budgets WHERE user_id = ? AND account_id = ? AND month = ?').run(USER_ID, accountId, month);
+  if (!amount) await db.prepare('DELETE FROM budgets WHERE user_id = ? AND account_id = ? AND month = ?').run(USER_ID, accountId, month);
   else
-    db.prepare(
+    await db.prepare(
       'INSERT INTO budgets (user_id, account_id, month, amount) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, account_id, month) DO UPDATE SET amount = excluded.amount',
     ).run(USER_ID, accountId, month, toCents(amount));
-  audit(db, 'set_budget', 'budget', accountId, { month, amount });
+  await audit(db, 'set_budget', 'budget', accountId, { month, amount });
 }
 
-export function budgetStatus(db: DB, month: string) {
+export async function budgetStatus(db: DB, month: string) {
   const from = `${month}-01`;
   const to = monthEnd(from);
-  const bal = accountBalances(db, { from, to });
-  const budgets = db.prepare('SELECT account_id, month, amount FROM budgets WHERE user_id = ? AND month IN (?, ?)').all(USER_ID, month, '*') as Array<{
+  const bal = await accountBalances(db, { from, to });
+  const budgets = await db.prepare('SELECT account_id, month, amount FROM budgets WHERE user_id = ? AND month IN (?, ?)').all(USER_ID, month, '*') as Array<{
     account_id: number;
     month: string;
     amount: number;
@@ -31,7 +31,7 @@ export function budgetStatus(db: DB, month: string) {
   const today = todayISO();
   const daysInMonth = Number(to.slice(8));
   const elapsed = today < from ? 0 : today > to ? daysInMonth : Number(today.slice(8));
-  const rows = listAccounts(db)
+  const rows = (await listAccounts(db))
     .filter((a) => a.type === 'expense')
     .map((a) => {
       const specific = budgets.find((b) => b.account_id === a.id && b.month === month);
@@ -64,46 +64,46 @@ export function budgetStatus(db: DB, month: string) {
 
 /* ---------------- Reconciliation ---------------- */
 
-export function startReconciliation(db: DB, accountId: number, statementDate: string, statementBalance: number): number {
-  const a = getAccount(db, accountId);
+export async function startReconciliation(db: DB, accountId: number, statementDate: string, statementBalance: number): Promise<number> {
+  const a = await getAccount(db, accountId);
   if (!a || !(a.type === 'asset' || a.type === 'liability')) throw new ValidationError('Choose a bank, cash, or credit-card account.');
   if (!isValidISODate(statementDate)) throw new ValidationError('Invalid statement date.');
-  const open = db.prepare("SELECT id FROM reconciliations WHERE account_id = ? AND status = 'in_progress'").get(accountId) as { id: number } | undefined;
+  const open = await db.prepare("SELECT id FROM reconciliations WHERE account_id = ? AND status = 'in_progress'").get(accountId) as { id: number } | undefined;
   if (open) return open.id;
   const id = Number(
-    db.prepare('INSERT INTO reconciliations (user_id, account_id, statement_date, statement_balance) VALUES (?, ?, ?, ?)').run(USER_ID, accountId, statementDate, toCents(statementBalance))
+    (await db.prepare('INSERT INTO reconciliations (user_id, account_id, statement_date, statement_balance) VALUES (?, ?, ?, ?)').run(USER_ID, accountId, statementDate, toCents(statementBalance)))
       .lastInsertRowid,
   );
-  audit(db, 'start', 'reconciliation', id, { accountId, statementDate, statementBalance });
+  await audit(db, 'start', 'reconciliation', id, { accountId, statementDate, statementBalance });
   return id;
 }
 
-export function reconciliationDetail(db: DB, id: number) {
-  const r = db.prepare('SELECT * FROM reconciliations WHERE id = ? AND user_id = ?').get(id, USER_ID) as
+export async function reconciliationDetail(db: DB, id: number) {
+  const r = await db.prepare('SELECT * FROM reconciliations WHERE id = ? AND user_id = ?').get(id, USER_ID) as
     | { id: number; account_id: number; statement_date: string; statement_balance: number; status: string; completed_at: string | null }
     | undefined;
   if (!r) throw new ValidationError('Reconciliation not found.');
-  const a = getAccount(db, r.account_id)!;
+  const a = (await getAccount(db, r.account_id))!;
   const sign = a.type === 'asset' ? 1 : -1;
-  const lines = db
+  const lines = (await db
     .prepare(
       `SELECT l.id, l.debit, l.credit, l.cleared, l.reconciliation_id, e.id AS entry_id, e.date, e.description, e.payee
        FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
        WHERE l.account_id = ? AND e.date <= ? AND (l.reconciliation_id IS NULL OR l.reconciliation_id = ?)
        ORDER BY e.date, e.id`,
     )
-    .all(r.account_id, r.statement_date, id) as Array<{ id: number; debit: number; credit: number; cleared: number; reconciliation_id: number | null; entry_id: number; date: string; description: string; payee: string | null }>;
-  const prev = db
+    .all(r.account_id, r.statement_date, id)) as Array<{ id: number; debit: number; credit: number; cleared: number; reconciliation_id: number | null; entry_id: number; date: string; description: string; payee: string | null }>;
+  const prev = (await db
     .prepare(
       `SELECT COALESCE(SUM(l.debit - l.credit),0) AS b FROM journal_lines l JOIN reconciliations r ON r.id = l.reconciliation_id
        WHERE l.account_id = ? AND r.status = 'completed' AND r.id <> ?`,
     )
-    .get(r.account_id, id) as { b: number };
+    .get(r.account_id, id)) as { b: number };
   const previouslyReconciled = sign * prev.b;
   const clearedNow = lines.filter((l) => l.cleared && l.reconciliation_id === id).reduce((s, l) => s + sign * (l.debit - l.credit), 0);
   const clearedBalance = previouslyReconciled + clearedNow;
   const rows = lines.map((l) => ({ ...l, amount: sign * (l.debit - l.credit), isCleared: Boolean(l.cleared && l.reconciliation_id === id) }));
-  const bookBalance = accountBalances(db, { to: r.statement_date }).get(r.account_id)?.balance ?? 0;
+  const bookBalance = (await accountBalances(db, { to: r.statement_date })).get(r.account_id)?.balance ?? 0;
   return {
     ...r,
     account: a,
@@ -115,31 +115,31 @@ export function reconciliationDetail(db: DB, id: number) {
   };
 }
 
-export function toggleCleared(db: DB, reconciliationId: number, lineId: number, cleared?: boolean): void {
-  const r = reconciliationDetail(db, reconciliationId);
+export async function toggleCleared(db: DB, reconciliationId: number, lineId: number, cleared?: boolean): Promise<void> {
+  const r = await reconciliationDetail(db, reconciliationId);
   if (r.status !== 'in_progress') throw new ValidationError('This reconciliation is already completed.');
   const line = r.rows.find((l) => l.id === lineId);
   if (!line) throw new ValidationError('Line is not part of this reconciliation.');
   const next = cleared ?? !line.isCleared;
-  db.prepare('UPDATE journal_lines SET cleared = ?, reconciliation_id = ? WHERE id = ?').run(next ? 1 : 0, next ? reconciliationId : null, lineId);
+  await db.prepare('UPDATE journal_lines SET cleared = ?, reconciliation_id = ? WHERE id = ?').run(next ? 1 : 0, next ? reconciliationId : null, lineId);
 }
 
-export function completeReconciliation(db: DB, id: number): void {
-  const r = reconciliationDetail(db, id);
+export async function completeReconciliation(db: DB, id: number): Promise<void> {
+  const r = await reconciliationDetail(db, id);
   if (r.status !== 'in_progress') throw new ValidationError('Already completed.');
   if (r.difference !== 0) throw new ValidationError(`Cannot complete: cleared balance differs from the statement by ${fromCents(r.difference).toFixed(2)}.`);
-  db.prepare("UPDATE reconciliations SET status = 'completed', completed_at = datetime('now') WHERE id = ?").run(id);
-  audit(db, 'complete', 'reconciliation', id, { accountId: r.account_id, statementBalance: r.statement_balance });
+  await db.prepare("UPDATE reconciliations SET status = 'completed', completed_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?").run(id);
+  await audit(db, 'complete', 'reconciliation', id, { accountId: r.account_id, statementBalance: r.statement_balance });
 }
 
-export function cancelReconciliation(db: DB, id: number): void {
-  const r = reconciliationDetail(db, id);
+export async function cancelReconciliation(db: DB, id: number): Promise<void> {
+  const r = await reconciliationDetail(db, id);
   if (r.status !== 'in_progress') throw new ValidationError('Completed reconciliations cannot be cancelled.');
-  db.transaction(() => {
-    db.prepare('UPDATE journal_lines SET cleared = 0, reconciliation_id = NULL WHERE reconciliation_id = ?').run(id);
-    db.prepare('DELETE FROM reconciliations WHERE id = ?').run(id);
+  await db.transaction(async () => {
+    await db.prepare('UPDATE journal_lines SET cleared = 0, reconciliation_id = NULL WHERE reconciliation_id = ?').run(id);
+    await db.prepare('DELETE FROM reconciliations WHERE id = ?').run(id);
   })();
-  audit(db, 'cancel', 'reconciliation', id);
+  await audit(db, 'cancel', 'reconciliation', id);
 }
 
 /* ---------------- Recurring transactions ---------------- */
@@ -178,43 +178,43 @@ export interface RecurringRow {
   is_active: number;
 }
 
-export function runDueRecurring(db: DB, today = todayISO()): number[] {
-  const due = db.prepare('SELECT * FROM recurring_transactions WHERE user_id = ? AND is_active = 1 AND auto_post = 1 AND next_date <= ?').all(USER_ID, today) as RecurringRow[];
+export async function runDueRecurring(db: DB, today = todayISO()): Promise<number[]> {
+  const due = await db.prepare('SELECT * FROM recurring_transactions WHERE user_id = ? AND is_active = 1 AND auto_post = 1 AND next_date <= ?').all(USER_ID, today) as RecurringRow[];
   const posted: number[] = [];
   for (const r of due) {
     let next = r.next_date;
     let guard = 0;
     while (next <= today && (!r.end_date || next <= r.end_date) && guard++ < 400) {
       try {
-        posted.push(postRecurringOnce(db, r, next));
+        posted.push((await postRecurringOnce(db, r, next)));
       } catch (e) {
-        audit(db, 'recurring_failed', 'recurring', r.id, { date: next, error: (e as Error).message });
+        await audit(db, 'recurring_failed', 'recurring', r.id, { date: next, error: (e as Error).message });
         break;
       }
       next = nextOccurrence(next, r.frequency);
     }
-    db.prepare('UPDATE recurring_transactions SET next_date = ?, is_active = ? WHERE id = ?').run(next, r.end_date && next > r.end_date ? 0 : 1, r.id);
+    await db.prepare('UPDATE recurring_transactions SET next_date = ?, is_active = ? WHERE id = ?').run(next, r.end_date && next > r.end_date ? 0 : 1, r.id);
   }
   return posted;
 }
 
 /** Posts the next scheduled occurrence immediately (optionally on another date) and advances the schedule. */
-export function postRecurringNow(db: DB, r: RecurringRow, date = r.next_date): number {
-  return db.transaction(() => {
-    const entryId = postRecurringOnce(db, r, date);
+export async function postRecurringNow(db: DB, r: RecurringRow, date = r.next_date): Promise<number> {
+  return db.transaction(async () => {
+    const entryId = await postRecurringOnce(db, r, date);
     const next = nextOccurrence(r.next_date, r.frequency);
-    db.prepare('UPDATE recurring_transactions SET next_date = ?, is_active = ? WHERE id = ?').run(next, r.end_date && next > r.end_date ? 0 : r.is_active, r.id);
-    audit(db, 'post_now', 'recurring', r.id, { date, entryId, nextDate: next });
+    await db.prepare('UPDATE recurring_transactions SET next_date = ?, is_active = ? WHERE id = ?').run(next, r.end_date && next > r.end_date ? 0 : r.is_active, r.id);
+    await audit(db, 'post_now', 'recurring', r.id, { date, entryId, nextDate: next });
     return entryId;
   })();
 }
 
-export function postRecurringOnce(db: DB, r: RecurringRow, date: string): number {
+export async function postRecurringOnce(db: DB, r: RecurringRow, date: string): Promise<number> {
   const tpl = JSON.parse(r.template) as Omit<EntryInput, 'date'>;
   return postEntry(db, { ...tpl, date, source: 'recurring', recurringId: r.id });
 }
 
-export function upsertRecurring(db: DB, input: { id?: number; description: string; frequency: string; nextDate: string; endDate?: string | null; autoPost?: boolean; template: Omit<EntryInput, 'date'> }): number {
+export async function upsertRecurring(db: DB, input: { id?: number; description: string; frequency: string; nextDate: string; endDate?: string | null; autoPost?: boolean; template: Omit<EntryInput, 'date'> }): Promise<number> {
   if (!FREQUENCIES.includes(input.frequency as (typeof FREQUENCIES)[number])) throw new ValidationError('Invalid frequency.');
   if (!isValidISODate(input.nextDate)) throw new ValidationError('Invalid next date.');
   // Validate the template by dry-running the balance check.
@@ -224,18 +224,18 @@ export function upsertRecurring(db: DB, input: { id?: number; description: strin
   if (lines.length < 2 || d !== c || d === 0) throw new ValidationError('The recurring template must be a balanced journal entry.');
   const tpl = JSON.stringify({ ...input.template, description: input.template.description || input.description });
   if (input.id) {
-    db.prepare('UPDATE recurring_transactions SET description = ?, frequency = ?, next_date = ?, end_date = ?, auto_post = ?, template = ? WHERE id = ? AND user_id = ?').run(
+    await db.prepare('UPDATE recurring_transactions SET description = ?, frequency = ?, next_date = ?, end_date = ?, auto_post = ?, template = ? WHERE id = ? AND user_id = ?').run(
       input.description, input.frequency, input.nextDate, input.endDate ?? null, input.autoPost === false ? 0 : 1, tpl, input.id, USER_ID,
     );
-    audit(db, 'update', 'recurring', input.id, input);
+    await audit(db, 'update', 'recurring', input.id, input);
     return input.id;
   }
   const id = Number(
-    db.prepare('INSERT INTO recurring_transactions (user_id, description, frequency, next_date, end_date, auto_post, template) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    (await db.prepare('INSERT INTO recurring_transactions (user_id, description, frequency, next_date, end_date, auto_post, template) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
       USER_ID, input.description, input.frequency, input.nextDate, input.endDate ?? null, input.autoPost === false ? 0 : 1, tpl,
-    ).lastInsertRowid,
+    )).lastInsertRowid,
   );
-  audit(db, 'create', 'recurring', id, input);
+  await audit(db, 'create', 'recurring', id, input);
   return id;
 }
 
@@ -305,15 +305,16 @@ export interface ImportRow {
   error?: string;
 }
 
-export function previewCsv(db: DB, csvText: string, accountId: number, mapping: CsvMapping, categorize: (description: string, inflow: boolean) => number | null) {
-  const account = getAccount(db, accountId);
+export async function previewCsv(db: DB, csvText: string, accountId: number, mapping: CsvMapping, categorize: (description: string, inflow: boolean) => Promise<number | null>) {
+  const account = await getAccount(db, accountId);
   if (!account) throw new ValidationError('Choose the account this statement belongs to.');
   const records = parse(csvText, { columns: mapping.hasHeader === false ? false : true, skip_empty_lines: true, relax_column_count: true, trim: true, bom: true }) as unknown as Array<Record<string, string>>;
   const headers = records.length ? Object.keys(records[0]) : [];
   if (!mapping.date || !mapping.description || !(mapping.amount || mapping.debit || mapping.credit)) {
     return { headers, guessed: guessMapping(headers), rows: [] as ImportRow[] };
   }
-  const rows: ImportRow[] = records.map((r, i) => {
+  const rows: ImportRow[] = [];
+  for (const [i, r] of records.entries()) rows.push(await (async () => {
     const date = parseCsvDate(r[mapping.date] ?? '', mapping.dateFormat);
     const description = (r[mapping.description] ?? '').trim();
     let amount = mapping.amount ? num(r[mapping.amount]) : num(r[mapping.credit ?? '']) - Math.abs(num(r[mapping.debit ?? '']));
@@ -321,36 +322,36 @@ export function previewCsv(db: DB, csvText: string, accountId: number, mapping: 
     if (mapping.invert) amount = -amount;
     amount = Math.round(amount * 100) / 100;
     const importHash = createHash('sha1').update(`${accountId}|${date}|${amount}|${description.toLowerCase()}`).digest('hex');
-    const duplicate = Boolean(db.prepare('SELECT 1 FROM journal_entries WHERE import_hash = ? AND reversed_by IS NULL').get(importHash));
-    const counter = amount ? categorize(description, amount > 0) : null;
+    const duplicate = Boolean(await db.prepare('SELECT 1 FROM journal_entries WHERE import_hash = ? AND reversed_by IS NULL').get(importHash));
+    const counter = amount ? await categorize(description, amount > 0) : null;
     return {
       rowNumber: i + 1,
       date,
       description,
       amount,
       counterAccountId: counter,
-      counterAccountName: counter ? getAccount(db, counter)?.name ?? null : null,
+      counterAccountName: counter ? (await getAccount(db, counter))?.name ?? null : null,
       importHash,
       duplicate,
       error: !date ? 'Unrecognised date' : !amount ? 'Zero amount' : undefined,
     };
-  });
+  })());
   return { headers, guessed: guessMapping(headers), rows };
 }
 
-export function commitCsv(db: DB, accountId: number, rows: Array<{ date: string; description: string; amount: number; counterAccountId: number; importHash?: string }>) {
-  const account = getAccount(db, accountId);
+export async function commitCsv(db: DB, accountId: number, rows: Array<{ date: string; description: string; amount: number; counterAccountId: number; importHash?: string }>) {
+  const account = await getAccount(db, accountId);
   if (!account) throw new ValidationError('Account not found.');
   const posted: number[] = [];
   const errors: Array<{ index: number; error: string }> = [];
-  db.transaction(() => {
-    rows.forEach((r, i) => {
+  await db.transaction(async () => {
+    for (const [i, r] of rows.entries()) {
       try {
         const amt = Math.abs(r.amount);
         const inflow = r.amount > 0;
-        const counter = getAccount(db, r.counterAccountId);
+        const counter = await getAccount(db, r.counterAccountId);
         posted.push(
-          postEntry(db, {
+          (await postEntry(db, {
             date: r.date,
             description: r.description || 'Imported transaction',
             payee: r.description,
@@ -366,14 +367,14 @@ export function commitCsv(db: DB, accountId: number, rows: Array<{ date: string;
                   { accountId: r.counterAccountId, debit: amt },
                   { accountId, credit: amt },
                 ],
-          }),
+          })),
         );
       } catch (e) {
         errors.push({ index: i, error: (e as Error).message });
       }
-    });
+    }
   })();
-  audit(db, 'import', 'csv', accountId, { posted: posted.length, errors: errors.length });
+  await audit(db, 'import', 'csv', accountId, { posted: posted.length, errors: errors.length });
   return { posted, errors };
 }
 

@@ -159,8 +159,8 @@ function findMentions(t: string, accts: Account[]): Mention[] {
     .sort((a, b) => a.index - b.index || b.length - a.length);
 }
 
-export function findCategory(db: DB, t: string, accts: Account[], types: Array<Account['type']>, merchant?: string | null): Account | undefined {
-  const rules = db.prepare('SELECT pattern, account_id FROM merchant_rules WHERE user_id = ? ORDER BY length(pattern) DESC').all(USER_ID) as Array<{ pattern: string; account_id: number }>;
+export async function findCategory(db: DB, t: string, accts: Account[], types: Array<Account['type']>, merchant?: string | null): Promise<Account | undefined> {
+  const rules = await db.prepare('SELECT pattern, account_id FROM merchant_rules WHERE user_id = ? ORDER BY length(pattern) DESC').all(USER_ID) as Array<{ pattern: string; account_id: number }>;
   for (const r of rules) {
     if ((merchant && merchant.toLowerCase().includes(r.pattern)) || new RegExp(`\\b${escapeRe(r.pattern)}\\b`).test(t)) {
       const a = accts.find((x) => x.id === r.account_id && types.includes(x.type));
@@ -198,10 +198,10 @@ function extractMerchant(text: string, type: TransactionType): string | null {
 }
 
 /** Deterministic, offline natural-language interpreter. Produces an Interpretation only. */
-export function ruleInterpret(db: DB, text: string, today = todayISO()): Interpretation {
+export async function ruleInterpret(db: DB, text: string, today = todayISO()): Promise<Interpretation> {
   const original = text.trim();
   const t = original.toLowerCase();
-  const accts = listAccounts(db, false);
+  const accts = await listAccounts(db, false);
   const { date } = parseDate(original, today);
 
   let currency = 'CAD';
@@ -307,12 +307,12 @@ export function ruleInterpret(db: DB, text: string, today = todayISO()): Interpr
   }
 
   let categoryAcct: Account | undefined;
-  if (['expense', 'credit_card_purchase', 'refund', 'liability_increase'].includes(type)) categoryAcct = findCategory(db, t, accts, ['expense'], merchant);
-  if (type === 'reimbursement') categoryAcct = findCategory(db, t.replace(/\breimburs\w*/g, ''), accts, ['expense'], merchant);
-  if (type === 'income') categoryAcct = findCategory(db, t, accts, ['income'], merchant);
+  if (['expense', 'credit_card_purchase', 'refund', 'liability_increase'].includes(type)) categoryAcct = await findCategory(db, t, accts, ['expense'], merchant);
+  if (type === 'reimbursement') categoryAcct = await findCategory(db, t.replace(/\breimburs\w*/g, ''), accts, ['expense'], merchant);
+  if (type === 'income') categoryAcct = await findCategory(db, t, accts, ['income'], merchant);
   if (type === 'interest') categoryAcct = accts.find((a) => a.subtype === 'interest' && a.type === 'income');
   if (type === 'dividend') categoryAcct = accts.find((a) => a.subtype === 'dividend' && a.type === 'income');
-  if (type === 'asset_purchase') destination = destination && destination.type === 'asset' && !['cash', 'bank', 'savings'].includes(destination.subtype) ? destination : findCategory(db, t, accts, ['asset']);
+  if (type === 'asset_purchase') destination = destination && destination.type === 'asset' && !['cash', 'bank', 'savings'].includes(destination.subtype) ? destination : (await findCategory(db, t, accts, ['asset']));
   if (type === 'asset_purchase' && destination && ['cash', 'bank', 'savings'].includes(destination.subtype)) destination = undefined;
 
   const direction = /\b(decrease|reduce|lower|down)\b/.test(t) ? 'decrease' : /\b(increase|raise|up)\b/.test(t) ? 'increase' : null;

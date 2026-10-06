@@ -81,7 +81,7 @@ function extractJson(s: string): unknown {
 
 /** Asks the LLM to interpret text into a structured Interpretation. The LLM never produces journal lines. */
 export async function llmInterpret(db: DB, text: string, today = todayISO()): Promise<Interpretation> {
-  const accounts = listAccounts(db, false).map((a) => ({ id: a.id, name: a.name, type: a.type, subtype: a.subtype, currency: a.currency }));
+  const accounts = (await listAccounts(db, false)).map((a) => ({ id: a.id, name: a.name, type: a.type, subtype: a.subtype, currency: a.currency }));
   const system = `You interpret personal-finance transactions described in natural language for a double-entry accounting system.
 Return ONLY a JSON object with these keys (use null when unknown, never invent amounts):
 transactionDate (YYYY-MM-DD; today is ${today}), amount (number, total), currency (ISO code, default CAD),

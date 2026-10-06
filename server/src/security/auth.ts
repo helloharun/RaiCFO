@@ -68,7 +68,9 @@ export class AuthService {
     this.dummyHash = hashPassword(randomBytes(16).toString('hex'));
     // Any change to the configured username/password/secret invalidates all existing sessions.
     this.credFingerprint = sha256(`${cfg.APP_USERNAME}\n${cfg.APP_PASSWORD_HASH ?? cfg.APP_PASSWORD}\n${cfg.SESSION_SECRET}`);
-    db.prepare('DELETE FROM sessions WHERE cred_fp <> ? OR expires_at < ?').run(this.credFingerprint, Date.now());
+    db.prepare('DELETE FROM sessions WHERE cred_fp <> ? OR expires_at < ?')
+      .run(this.credFingerprint, Date.now())
+      .catch((e) => console.error('Session cleanup failed:', (e as Error).message));
   }
 
   private tokenId(token: string) {
@@ -111,7 +113,7 @@ export class AuthService {
     if (!ok) {
       this.recordFailure(ipKey, this.cfg.LOGIN_MAX_ATTEMPTS);
       this.recordFailure('global', this.cfg.LOGIN_MAX_ATTEMPTS * 10);
-      audit(this.db, 'login_failed', 'auth', null, { ip, userAgent: userAgent.slice(0, 200) });
+      await audit(this.db, 'login_failed', 'auth', null, { ip, userAgent: userAgent.slice(0, 200) });
       return { ok: false as const, retryAfter: Math.max(this.lockStatus(ipKey), this.lockStatus('global')) };
     }
     this.attempts.delete(ipKey);
@@ -127,39 +129,39 @@ export class AuthService {
       ip,
       user_agent: userAgent.slice(0, 300),
     };
-    this.db
-      .prepare('INSERT INTO sessions (id, csrf, cred_fp, created_at, last_seen, expires_at, ip, user_agent) VALUES (@id, @csrf, @cred_fp, @created_at, @last_seen, @expires_at, @ip, @user_agent)')
-      .run(row);
-    audit(this.db, 'login', 'auth', null, { ip, userAgent: row.user_agent });
+    await this.db
+      .prepare('INSERT INTO sessions (id, csrf, cred_fp, created_at, last_seen, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.csrf, row.cred_fp, row.created_at, row.last_seen, row.expires_at, row.ip, row.user_agent);
+    await audit(this.db, 'login', 'auth', null, { ip, userAgent: row.user_agent });
     return { ok: true as const, token, session: row };
   }
 
-  resolve(token: string | undefined, now = Date.now()): SessionRow | undefined {
+  async resolve(token: string | undefined, now = Date.now()): Promise<SessionRow | undefined> {
     if (!token || token.length > 200) return undefined;
-    const s = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(this.tokenId(token)) as SessionRow | undefined;
+    const s = await this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(this.tokenId(token)) as SessionRow | undefined;
     if (!s) return undefined;
     const idleMs = this.cfg.SESSION_IDLE_MINUTES * 60_000;
     if (s.expires_at < now || now - s.last_seen > idleMs || s.cred_fp !== this.credFingerprint) {
-      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
+      await this.db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
       return undefined;
     }
     if (now - s.last_seen > 15_000) {
-      this.db.prepare('UPDATE sessions SET last_seen = ? WHERE id = ?').run(now, s.id);
+      await this.db.prepare('UPDATE sessions SET last_seen = ? WHERE id = ?').run(now, s.id);
       s.last_seen = now;
     }
     return s;
   }
 
-  destroy(id: string) {
-    this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+  async destroy(id: string) {
+    await this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
   }
 
-  destroyOthers(id: string) {
-    return this.db.prepare('DELETE FROM sessions WHERE id <> ?').run(id).changes;
+  async destroyOthers(id: string) {
+    return (await this.db.prepare('DELETE FROM sessions WHERE id <> ?').run(id)).changes;
   }
 
-  cleanup() {
-    this.db.prepare('DELETE FROM sessions WHERE expires_at < ? OR last_seen < ?').run(Date.now(), Date.now() - this.cfg.SESSION_IDLE_MINUTES * 60_000);
+  async cleanup() {
+    await this.db.prepare('DELETE FROM sessions WHERE expires_at < ? OR last_seen < ?').run(Date.now(), Date.now() - this.cfg.SESSION_IDLE_MINUTES * 60_000);
   }
 }
 
@@ -208,8 +210,8 @@ export function authRouter(db: DB, cfg: AppConfig, auth: AuthService) {
     }
   });
 
-  r.get('/auth/session', (req, res) => {
-    const s = auth.resolve(parseCookies(req.headers.cookie)[name]);
+  r.get('/auth/session', async (req, res) => {
+    const s = await auth.resolve(parseCookies(req.headers.cookie)[name]);
     if (!s) return res.json({ authenticated: false });
     res.json({ authenticated: true, username: cfg.APP_USERNAME, csrfToken: s.csrf, expiresAt: s.expires_at, idleMinutes: cfg.SESSION_IDLE_MINUTES });
   });
@@ -220,8 +222,8 @@ export function authRouter(db: DB, cfg: AppConfig, auth: AuthService) {
 /** Requires a valid session for every route after it, plus CSRF token + same-origin for state-changing requests. */
 export function requireAuth(cfg: AppConfig, auth: AuthService) {
   const name = cookieName(cfg);
-  return (req: Request, res: Response, next: NextFunction) => {
-    const s = auth.resolve(parseCookies(req.headers.cookie)[name]);
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const s = await auth.resolve(parseCookies(req.headers.cookie)[name]);
     if (!s) {
       res.clearCookie(name, { path: '/', httpOnly: true, secure: cfg.cookieSecure, sameSite: 'strict' });
       return res.status(401).json({ error: 'Not signed in or session expired.' });
@@ -238,19 +240,19 @@ export function requireAuth(cfg: AppConfig, auth: AuthService) {
 export function sessionRoutes(db: DB, cfg: AppConfig, auth: AuthService) {
   const r = express.Router();
   const name = cookieName(cfg);
-  r.post('/auth/logout', (req, res) => {
-    auth.destroy(req.session!.id);
-    audit(db, 'logout', 'auth', null);
+  r.post('/auth/logout', async (req, res) => {
+    await auth.destroy(req.session!.id);
+    await audit(db, 'logout', 'auth', null);
     res.clearCookie(name, { path: '/', httpOnly: true, secure: cfg.cookieSecure, sameSite: 'strict' });
     res.json({ ok: true });
   });
-  r.get('/auth/sessions', (req, res) => {
-    const rows = db.prepare('SELECT id, created_at, last_seen, expires_at, ip, user_agent FROM sessions ORDER BY last_seen DESC').all() as SessionRow[];
+  r.get('/auth/sessions', async (req, res) => {
+    const rows = await db.prepare('SELECT id, created_at, last_seen, expires_at, ip, user_agent FROM sessions ORDER BY last_seen DESC').all() as SessionRow[];
     res.json(rows.map((x) => ({ current: x.id === req.session!.id, createdAt: x.created_at, lastSeen: x.last_seen, expiresAt: x.expires_at, ip: x.ip, userAgent: x.user_agent })));
   });
-  r.post('/auth/sessions/revoke-others', (req, res) => {
-    const n = auth.destroyOthers(req.session!.id);
-    audit(db, 'revoke_sessions', 'auth', null, { count: n });
+  r.post('/auth/sessions/revoke-others', async (req, res) => {
+    const n = await auth.destroyOthers(req.session!.id);
+    await audit(db, 'revoke_sessions', 'auth', null, { count: n });
     res.json({ revoked: n });
   });
   return r;

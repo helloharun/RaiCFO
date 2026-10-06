@@ -40,15 +40,15 @@ function groupBySubtype(rows: ReportRow[]) {
   return [...groups.entries()].map(([subtype, rs]) => ({ subtype, label: subtypeLabel(subtype), rows: rs, total: sum(rs) }));
 }
 
-export function netIncome(db: DB, from: string | undefined, to: string): number {
-  const bal = accountBalances(db, { from, to });
-  const accts = listAccounts(db);
+export async function netIncome(db: DB, from: string | undefined, to: string): Promise<number> {
+  const bal = await accountBalances(db, { from, to });
+  const accts = await listAccounts(db);
   return sum(rowsFor(accts, bal, 'income')) - sum(rowsFor(accts, bal, 'expense'));
 }
 
-export function trialBalance(db: DB, asOf = todayISO()) {
-  const bal = accountBalances(db, { to: asOf });
-  const rows = listAccounts(db)
+export async function trialBalance(db: DB, asOf = todayISO()) {
+  const bal = await accountBalances(db, { to: asOf });
+  const rows = (await listAccounts(db))
     .map((a) => {
       const b = bal.get(a.id);
       const net = b ? b.debit - b.credit : 0;
@@ -60,9 +60,9 @@ export function trialBalance(db: DB, asOf = todayISO()) {
   return { asOf, rows, totalDebit, totalCredit, balanced: totalDebit === totalCredit };
 }
 
-export function incomeStatement(db: DB, from: string, to: string) {
-  const bal = accountBalances(db, { from, to });
-  const accts = listAccounts(db);
+export async function incomeStatement(db: DB, from: string, to: string) {
+  const bal = await accountBalances(db, { from, to });
+  const accts = await listAccounts(db);
   const income = rowsFor(accts, bal, 'income').sort((a, b) => b.amount - a.amount);
   const expenses = rowsFor(accts, bal, 'expense').sort((a, b) => b.amount - a.amount);
   const totalIncome = sum(income);
@@ -75,15 +75,15 @@ export function fiscalYearStart(asOf: string): string {
   return `${asOf.slice(0, 4)}-01-01`;
 }
 
-export function balanceSheet(db: DB, asOf = todayISO()) {
-  const bal = accountBalances(db, { to: asOf });
-  const accts = listAccounts(db);
+export async function balanceSheet(db: DB, asOf = todayISO()) {
+  const bal = await accountBalances(db, { to: asOf });
+  const accts = await listAccounts(db);
   const assets = rowsFor(accts, bal, 'asset');
   const liabilities = rowsFor(accts, bal, 'liability');
   const equityAccts = rowsFor(accts, bal, 'equity');
   const fy = fiscalYearStart(asOf);
-  const priorEarnings = netIncome(db, undefined, addDays(fy, -1));
-  const currentEarnings = netIncome(db, fy, asOf);
+  const priorEarnings = await netIncome(db, undefined, addDays(fy, -1));
+  const currentEarnings = await netIncome(db, fy, asOf);
   const equity = [
     ...equityAccts,
     { accountId: -1, code: '', name: 'Accumulated Earnings (prior years)', subtype: 'accumulated_equity', amount: priorEarnings },
@@ -117,15 +117,15 @@ export function isCashAccount(a: Account): boolean {
   return a.type === 'asset' && CASH_SUBTYPES.includes(a.subtype);
 }
 
-export function cashFlowStatement(db: DB, from: string, to: string) {
-  const accts = listAccounts(db);
+export async function cashFlowStatement(db: DB, from: string, to: string) {
+  const accts = await listAccounts(db);
   const byId = new Map(accts.map((a) => [a.id, a]));
-  const rows = db
+  const rows = (await db
     .prepare(
       `SELECT l.entry_id, l.account_id, l.debit, l.credit FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
        WHERE e.user_id = ? AND e.date >= ? AND e.date <= ? ORDER BY l.entry_id`,
     )
-    .all(USER_ID, from, to) as Array<{ entry_id: number; account_id: number; debit: number; credit: number }>;
+    .all(USER_ID, from, to)) as Array<{ entry_id: number; account_id: number; debit: number; credit: number }>;
   const entries = new Map<number, typeof rows>();
   for (const r of rows) {
     if (!entries.has(r.entry_id)) entries.set(r.entry_id, []);
@@ -150,34 +150,34 @@ export function cashFlowStatement(db: DB, from: string, to: string) {
     return { section: s, rows: r, total: sum(r) };
   });
   const cashIds = accts.filter(isCashAccount).map((a) => a.id);
-  const cashAt = (d: string) => {
-    const b = accountBalances(db, { to: d });
+  const cashAt = async (d: string) => {
+    const b = await accountBalances(db, { to: d });
     return cashIds.reduce((s, id) => s + (b.get(id)?.balance ?? 0), 0);
   };
-  const beginningCash = cashAt(addDays(from, -1));
-  const endingCash = cashAt(to);
+  const beginningCash = await cashAt(addDays(from, -1));
+  const endingCash = await cashAt(to);
   const netChange = sections.reduce((s, x) => s + x.total, 0);
   return { from, to, sections, netChange, beginningCash, endingCash, reconciles: beginningCash + netChange === endingCash };
 }
 
-function equityTotal(db: DB, asOf: string): number {
-  const bal = accountBalances(db, { to: asOf });
-  const accts = listAccounts(db);
+async function equityTotal(db: DB, asOf: string): Promise<number> {
+  const bal = await accountBalances(db, { to: asOf });
+  const accts = await listAccounts(db);
   return sum(rowsFor(accts, bal, 'asset')) - sum(rowsFor(accts, bal, 'liability'));
 }
 
-export function equityStatement(db: DB, from: string, to: string) {
-  const bal = accountBalances(db, { from, to });
-  const accts = listAccounts(db);
+export async function equityStatement(db: DB, from: string, to: string) {
+  const bal = await accountBalances(db, { from, to });
+  const accts = await listAccounts(db);
   const change = (subtypes: string[]) =>
     accts.filter((a) => a.type === 'equity' && subtypes.includes(a.subtype)).reduce((s, a) => s + (bal.get(a.id)?.balance ?? 0), 0);
-  const opening = equityTotal(db, addDays(from, -1));
-  const ni = netIncome(db, from, to);
+  const opening = await equityTotal(db, addDays(from, -1));
+  const ni = await netIncome(db, from, to);
   const contributions = change(['owner_contribution']);
   const withdrawals = change(['owner_withdrawal']);
   const openingBalances = change(['opening_balance_equity']);
   const other = change(['accumulated_equity', 'current_earnings']);
-  const closing = equityTotal(db, to);
+  const closing = await equityTotal(db, to);
   const rows = [
     { name: 'Opening balances recorded', amount: openingBalances },
     { name: 'Net income for the period', amount: ni },
@@ -188,10 +188,10 @@ export function equityStatement(db: DB, from: string, to: string) {
   return { from, to, opening, rows, closing, reconciles: opening + sum(rows) === closing };
 }
 
-export function netWorthStatement(db: DB, asOf = todayISO()) {
-  const bal = accountBalances(db, { to: asOf });
-  const accts = listAccounts(db);
-  const adj = marketAdjustments(db, asOf);
+export async function netWorthStatement(db: DB, asOf = todayISO()) {
+  const bal = await accountBalances(db, { to: asOf });
+  const accts = await listAccounts(db);
+  const adj = await marketAdjustments(db, asOf);
   const assets = rowsFor(accts, bal, 'asset').map((r) => ({
     ...r,
     marketValue: r.amount + (INVESTMENT_SUBTYPES.includes(r.subtype) ? adj.get(r.accountId) ?? 0 : 0),
@@ -224,12 +224,12 @@ export function netWorthStatement(db: DB, asOf = todayISO()) {
   };
 }
 
-export function netWorthTrend(db: DB, months = 12, asOf = todayISO()) {
+export async function netWorthTrend(db: DB, months = 12, asOf = todayISO()) {
   const out: Array<{ month: string; assets: number; liabilities: number; netWorth: number }> = [];
-  const accts = listAccounts(db);
+  const accts = await listAccounts(db);
   for (let i = months - 1; i >= 0; i--) {
     const end = i === 0 ? asOf : monthEnd(addMonths(monthStart(asOf), -i));
-    const bal = accountBalances(db, { to: end });
+    const bal = await accountBalances(db, { to: end });
     const a = sum(rowsFor(accts, bal, 'asset'));
     const l = sum(rowsFor(accts, bal, 'liability'));
     out.push({ month: end.slice(0, 7), assets: a, liabilities: l, netWorth: a - l });
@@ -237,17 +237,17 @@ export function netWorthTrend(db: DB, months = 12, asOf = todayISO()) {
   return out;
 }
 
-export function generalLedger(db: DB, from: string, to: string, accountId?: number) {
-  const accts = listAccounts(db).filter((a) => !accountId || a.id === accountId);
-  const opening = accountBalances(db, { to: addDays(from, -1) });
-  const lines = db
+export async function generalLedger(db: DB, from: string, to: string, accountId?: number) {
+  const accts = (await listAccounts(db)).filter((a) => !accountId || a.id === accountId);
+  const opening = await accountBalances(db, { to: addDays(from, -1) });
+  const lines = (await db
     .prepare(
       `SELECT l.account_id, l.debit, l.credit, l.memo, e.id AS entry_id, e.date, e.description, e.payee
        FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
        WHERE e.user_id = ? AND e.date >= ? AND e.date <= ? ${accountId ? 'AND l.account_id = ?' : ''}
        ORDER BY e.date, e.id, l.id`,
     )
-    .all(USER_ID, from, to, ...(accountId ? [accountId] : [])) as Array<{
+    .all(USER_ID, from, to, ...(accountId ? [accountId] : []))) as Array<{
     account_id: number;
     debit: number;
     credit: number;

@@ -48,9 +48,9 @@ export interface Proposal {
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9&+' -]/g, ' ').replace(/\s+/g, ' ').trim();
 
 /** Finds an account by id, exact name, code, alias or institution, limited to the given predicate. */
-export function resolveAccount(db: DB, ref: string | number | null | undefined, pred: (a: Account) => boolean = () => true): Account | undefined {
+export async function resolveAccount(db: DB, ref: string | number | null | undefined, pred: (a: Account) => boolean = () => true): Promise<Account | undefined> {
   if (ref === null || ref === undefined || ref === '') return undefined;
-  const accts = listAccounts(db, false).filter(pred);
+  const accts = (await listAccounts(db, false)).filter(pred);
   if (typeof ref === 'number' || /^\d+$/.test(String(ref))) {
     const byId = accts.find((a) => a.id === Number(ref));
     if (byId) return byId;
@@ -86,15 +86,15 @@ const isPaymentSource = (a: Account) => isCashLike(a) || (a.type === 'liability'
 const isInvestment = (a: Account) => a.type === 'asset' && INVESTMENT_SUBTYPES.includes(a.subtype);
 const isLoan = (a: Account) => a.type === 'liability' && LOAN_SUBTYPES.includes(a.subtype);
 
-export function defaultBankAccount(db: DB): Account | undefined {
-  const pref = getSetting(db, 'default_payment_account');
-  const a = pref ? getAccount(db, Number(pref)) : undefined;
+export async function defaultBankAccount(db: DB): Promise<Account | undefined> {
+  const pref = await getSetting(db, 'default_payment_account');
+  const a = pref ? (await getAccount(db, Number(pref))) : undefined;
   if (a && a.is_active) return a;
-  return listAccounts(db, false).find((x) => x.type === 'asset' && x.subtype === 'bank') ?? listAccounts(db, false).find(isCashLike);
+  return (await listAccounts(db, false)).find((x) => x.type === 'asset' && x.subtype === 'bank') ?? (await listAccounts(db, false)).find(isCashLike);
 }
 
-function bySubtype(db: DB, subtype: string): Account | undefined {
-  return listAccounts(db, false).find((a) => a.subtype === subtype);
+async function bySubtype(db: DB, subtype: string): Promise<Account | undefined> {
+  return (await listAccounts(db, false)).find((a) => a.subtype === subtype);
 }
 
 const DEFAULT_INCOME_SUBTYPE: Record<string, string> = { interest: 'interest', dividend: 'dividend', income: 'other_income' };
@@ -135,7 +135,7 @@ const TYPE_NOTES: Partial<Record<TransactionType, string>> = {
  * Deterministic accounting rules: turns an interpretation into a balanced journal entry proposal.
  * The AI never chooses debits/credits itself; this function does.
  */
-export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 'llm' = 'rules', rawInput?: string): Proposal {
+export async function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 'llm' = 'rules', rawInput?: string): Promise<Proposal> {
   const clar: string[] = [...(interp.clarifications ?? [])];
   const warnings: string[] = [];
   const type = (TRANSACTION_TYPES as readonly string[]).includes(String(interp.transactionType))
@@ -151,7 +151,7 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
   const currency = (interp.currency || BASE_CURRENCY).toUpperCase();
   let rate = 1;
   try {
-    rate = fxRate(db, currency, date);
+    rate = await fxRate(db, currency, date);
   } catch (e) {
     warnings.push((e as Error).message);
   }
@@ -160,30 +160,30 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
 
   const merchant = interp.merchant?.trim() || null;
 
-  const pay = () => {
+  const pay = async () => {
     let a =
-      resolveAccount(db, interp.paymentAccountId ?? undefined, isPaymentSource) ??
-      resolveAccount(db, interp.paymentAccount ?? undefined) ??
-      resolveAccount(db, interp.paymentMethod ?? undefined, isPaymentSource);
+      (await resolveAccount(db, interp.paymentAccountId ?? undefined, isPaymentSource)) ??
+      (await resolveAccount(db, interp.paymentAccount ?? undefined)) ??
+      (await resolveAccount(db, interp.paymentMethod ?? undefined, isPaymentSource));
     if (!a) {
-      a = defaultBankAccount(db);
+      a = await defaultBankAccount(db);
       if (a) clar.push(`Which account was used? I assumed ${a.name}.`);
     }
     return a;
   };
-  const dest = (pred: (a: Account) => boolean, fallback?: () => Account | undefined, question?: string) => {
-    let a = resolveAccount(db, interp.destinationAccountId ?? undefined) ?? resolveAccount(db, interp.destinationAccount ?? undefined, pred);
+  const dest = async (pred: (a: Account) => boolean, fallback?: () => Account | undefined | Promise<Account | undefined>, question?: string) => {
+    let a = (await resolveAccount(db, interp.destinationAccountId ?? undefined)) ?? (await resolveAccount(db, interp.destinationAccount ?? undefined, pred));
     if (!a && fallback) {
-      a = fallback();
+      a = await fallback();
       if (a && question) clar.push(question.replace('%s', a.name));
     }
     return a;
   };
-  const category = (pred: (a: Account) => boolean, fallbackSubtype: string, question: string) => {
-    let a = resolveAccount(db, interp.categoryAccountId ?? undefined, pred) ?? resolveAccount(db, interp.category ?? undefined, pred);
-    if (!a && merchant) a = merchantRule(db, merchant, pred);
+  const category = async (pred: (a: Account) => boolean, fallbackSubtype: string, question: string) => {
+    let a = (await resolveAccount(db, interp.categoryAccountId ?? undefined, pred)) ?? (await resolveAccount(db, interp.category ?? undefined, pred));
+    if (!a && merchant) a = await merchantRule(db, merchant, pred);
     if (!a) {
-      a = bySubtype(db, fallbackSubtype);
+      a = await bySubtype(db, fallbackSubtype);
       if (a) clar.push(question.replace('%s', a.name));
     }
     return a;
@@ -205,8 +205,8 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
   switch (type) {
     case 'expense':
     case 'credit_card_purchase': {
-      const cat = category(isExpense, 'other_expense', 'Which expense category fits best? I used %s.');
-      const src = pay();
+      const cat = await category(isExpense, 'other_expense', 'Which expense category fits best? I used %s.');
+      const src = await pay();
       if (src?.subtype === 'credit_card') effectiveType = 'credit_card_purchase';
       dr(cat, amount);
       cr(src, amount);
@@ -216,16 +216,16 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
     case 'income':
     case 'interest':
     case 'dividend': {
-      const cat = category(isIncome, DEFAULT_INCOME_SUBTYPE[type], 'Which income category is this? I used %s.');
-      const to = dest((a) => a.type === "asset", () => resolveAccount(db, interp.paymentAccount ?? undefined) ?? defaultBankAccount(db), 'Which account received the money? I assumed %s.');
+      const cat = await category(isIncome, DEFAULT_INCOME_SUBTYPE[type], 'Which income category is this? I used %s.');
+      const to = await dest((a) => a.type === "asset", async () => (await resolveAccount(db, interp.paymentAccount ?? undefined)) ?? (await defaultBankAccount(db)), 'Which account received the money? I assumed %s.');
       dr(to, amount);
       cr(cat, amount);
       descr ||= `${cat?.name ?? 'Income'}${merchant ? ` from ${merchant}` : ''}`;
       break;
     }
     case 'transfer': {
-      const from = resolveAccount(db, interp.paymentAccountId ?? undefined) ?? resolveAccount(db, interp.paymentAccount ?? undefined);
-      const to = resolveAccount(db, interp.destinationAccountId ?? undefined) ?? resolveAccount(db, interp.destinationAccount ?? undefined);
+      const from = (await resolveAccount(db, interp.paymentAccountId ?? undefined)) ?? (await resolveAccount(db, interp.paymentAccount ?? undefined));
+      const to = (await resolveAccount(db, interp.destinationAccountId ?? undefined)) ?? (await resolveAccount(db, interp.destinationAccount ?? undefined));
       if (!from) clar.push('Which account did the money come from?');
       if (!to) clar.push('Which account did the money go to?');
       if (from && to && from.id === to.id) clar.push('The source and destination accounts are the same.');
@@ -237,10 +237,10 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
     }
     case 'credit_card_payment': {
       const card =
-        resolveAccount(db, interp.destinationAccountId ?? undefined, (a) => a.subtype === 'credit_card') ??
-        resolveAccount(db, interp.destinationAccount ?? undefined, (a) => a.subtype === 'credit_card') ??
-        firstOrAsk(db, (a) => a.subtype === 'credit_card', clar, 'Which credit card was paid? I assumed %s.');
-      const from = resolveAccount(db, interp.paymentAccountId ?? undefined, isCashLike) ?? resolveAccount(db, interp.paymentAccount ?? undefined, isCashLike) ?? withAsk(defaultBankAccount(db), clar, 'Which account was the payment made from? I assumed %s.');
+        (await resolveAccount(db, interp.destinationAccountId ?? undefined, (a) => a.subtype === 'credit_card')) ??
+        (await resolveAccount(db, interp.destinationAccount ?? undefined, (a) => a.subtype === 'credit_card')) ??
+        (await firstOrAsk(db, (a) => a.subtype === 'credit_card', clar, 'Which credit card was paid? I assumed %s.'));
+      const from = (await resolveAccount(db, interp.paymentAccountId ?? undefined, isCashLike)) ?? (await resolveAccount(db, interp.paymentAccount ?? undefined, isCashLike)) ?? withAsk((await defaultBankAccount(db)), clar, 'Which account was the payment made from? I assumed %s.');
       dr(card, amount);
       cr(from, amount);
       descr ||= `Payment to ${card?.name ?? 'credit card'}`;
@@ -248,10 +248,10 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
     }
     case 'loan_payment': {
       const loan =
-        resolveAccount(db, interp.destinationAccountId ?? undefined, isLoan) ??
-        resolveAccount(db, interp.destinationAccount ?? undefined, isLoan) ??
-        firstOrAsk(db, isLoan, clar, 'Which loan was paid? I assumed %s.');
-      const from = resolveAccount(db, interp.paymentAccountId ?? undefined, isPaymentSource) ?? resolveAccount(db, interp.paymentAccount ?? undefined, isPaymentSource) ?? withAsk(defaultBankAccount(db), clar, 'Which account was the payment made from? I assumed %s.');
+        (await resolveAccount(db, interp.destinationAccountId ?? undefined, isLoan)) ??
+        (await resolveAccount(db, interp.destinationAccount ?? undefined, isLoan)) ??
+        (await firstOrAsk(db, isLoan, clar, 'Which loan was paid? I assumed %s.'));
+      const from = (await resolveAccount(db, interp.paymentAccountId ?? undefined, isPaymentSource)) ?? (await resolveAccount(db, interp.paymentAccount ?? undefined, isPaymentSource)) ?? withAsk((await defaultBankAccount(db)), clar, 'Which account was the payment made from? I assumed %s.');
       let interest = Math.abs(Number(interp.interest ?? 0));
       let principal = Math.abs(Number(interp.principal ?? 0));
       const total = amount || principal + interest;
@@ -261,7 +261,7 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
       } else if (!principal) principal = Math.max(total - interest, 0);
       else if (!interest) interest = Math.max(total - principal, 0);
       if (Math.abs(principal + interest - total) > 0.005) warnings.push(`Principal (${fmt(principal)}) + interest (${fmt(interest)}) ≠ payment (${fmt(total)}). Using principal + interest.`);
-      const interestAcct = loan?.subtype === 'mortgage' ? bySubtype(db, 'mortgage_interest') : bySubtype(db, 'interest_expense');
+      const interestAcct = loan?.subtype === 'mortgage' ? (await bySubtype(db, 'mortgage_interest')) : (await bySubtype(db, 'interest_expense'));
       dr(loan, principal, { memo: 'Principal' });
       dr(interestAcct, interest, { memo: 'Interest' });
       cr(from, principal + interest);
@@ -270,18 +270,18 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
     }
     case 'loan_proceeds': {
       const loan =
-        resolveAccount(db, interp.paymentAccountId ?? undefined, isLoan) ??
-        resolveAccount(db, interp.paymentAccount ?? undefined, isLoan) ??
-        firstOrAsk(db, isLoan, clar, 'Which loan is this? I assumed %s.');
-      const to = dest(isCashLike, () => defaultBankAccount(db), 'Which account received the funds? I assumed %s.');
+        (await resolveAccount(db, interp.paymentAccountId ?? undefined, isLoan)) ??
+        (await resolveAccount(db, interp.paymentAccount ?? undefined, isLoan)) ??
+        (await firstOrAsk(db, isLoan, clar, 'Which loan is this? I assumed %s.'));
+      const to = await dest(isCashLike, () => defaultBankAccount(db), 'Which account received the funds? I assumed %s.');
       dr(to, amount);
       cr(loan, amount);
       descr ||= `Proceeds from ${loan?.name ?? 'loan'}`;
       break;
     }
     case 'investment_purchase': {
-      const inv = dest(isInvestment, () => listAccounts(db, false).find(isInvestment), 'Which investment account holds this? I assumed %s.');
-      const from = resolveAccount(db, interp.paymentAccountId ?? undefined, isPaymentSource) ?? resolveAccount(db, interp.paymentAccount ?? undefined, isPaymentSource) ?? withAsk(defaultBankAccount(db), clar, 'Which account paid for it? I assumed %s.');
+      const inv = await dest(isInvestment, async () => (await listAccounts(db, false)).find(isInvestment), 'Which investment account holds this? I assumed %s.');
+      const from = (await resolveAccount(db, interp.paymentAccountId ?? undefined, isPaymentSource)) ?? (await resolveAccount(db, interp.paymentAccount ?? undefined, isPaymentSource)) ?? withAsk((await defaultBankAccount(db)), clar, 'Which account paid for it? I assumed %s.');
       const qty = interp.quantity ?? null;
       const fees = Math.abs(Number(interp.fees ?? 0));
       const total = amount || (qty && interp.price ? qty * interp.price + fees : 0);
@@ -294,15 +294,15 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
     }
     case 'investment_sale': {
       const inv =
-        resolveAccount(db, interp.paymentAccountId ?? undefined, isInvestment) ??
-        resolveAccount(db, interp.paymentAccount ?? undefined, isInvestment) ??
-        firstOrAsk(db, isInvestment, clar, 'Which investment account was it sold from? I assumed %s.');
-      const to = resolveAccount(db, interp.destinationAccountId ?? undefined) ?? resolveAccount(db, interp.destinationAccount ?? undefined) ?? withAsk(inv, clar, 'Where did the proceeds go? I kept them as cash in %s.');
+        (await resolveAccount(db, interp.paymentAccountId ?? undefined, isInvestment)) ??
+        (await resolveAccount(db, interp.paymentAccount ?? undefined, isInvestment)) ??
+        (await firstOrAsk(db, isInvestment, clar, 'Which investment account was it sold from? I assumed %s.'));
+      const to = (await resolveAccount(db, interp.destinationAccountId ?? undefined)) ?? (await resolveAccount(db, interp.destinationAccount ?? undefined)) ?? withAsk(inv, clar, 'Where did the proceeds go? I kept them as cash in %s.');
       const qty = interp.quantity ?? null;
       const proceeds = amount || (qty && interp.price ? qty * interp.price - Math.abs(Number(interp.fees ?? 0)) : 0);
       let cost = interp.costBasis ?? null;
       if (cost === null && inv && interp.symbol) {
-        const basis = costBasisForSale(db, inv.id, interp.symbol, qty ?? Infinity, date);
+        const basis = await costBasisForSale(db, inv.id, interp.symbol, qty ?? Infinity, date);
         if (basis) {
           cost = fromCents(basis.cost) / rate;
           if (qty && qty > basis.held) warnings.push(`You only hold ${basis.held} units of ${interp.symbol}.`);
@@ -313,7 +313,7 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
         clar.push('What was the cost basis of the units sold? I could not find a holding, so no gain/loss was recorded.');
       }
       if (!interp.symbol) clar.push('Which security (ticker symbol) did you sell?');
-      const gains = bySubtype(db, 'capital_gains');
+      const gains = await bySubtype(db, 'capital_gains');
       dr(to, proceeds);
       cr(inv, cost, { symbol: interp.symbol ?? null, quantity: qty ? -qty : null, memo: 'Cost basis (average cost)' });
       const gain = round2(proceeds - cost);
@@ -323,8 +323,8 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
       break;
     }
     case 'asset_purchase': {
-      const asset = dest((a) => a.type === 'asset' && !isCashLike(a), () => bySubtype(db, 'personal_asset'), 'Which asset account should this go to? I used %s.');
-      const src = pay();
+      const asset = await dest((a) => a.type === 'asset' && !isCashLike(a), () => bySubtype(db, 'personal_asset'), 'Which asset account should this go to? I used %s.');
+      const src = await pay();
       dr(asset, amount);
       cr(src, amount);
       descr ||= `Purchase of ${asset?.name ?? 'asset'}${merchant ? ` from ${merchant}` : ''}`;
@@ -332,15 +332,15 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
     }
     case 'asset_sale': {
       const asset =
-        resolveAccount(db, interp.paymentAccountId ?? undefined, (a) => a.type === 'asset' && !isCashLike(a)) ??
-        resolveAccount(db, interp.paymentAccount ?? undefined, (a) => a.type === 'asset' && !isCashLike(a)) ??
-        firstOrAsk(db, (a) => a.subtype === 'personal_asset', clar, 'Which asset was sold? I assumed %s.');
-      const to = dest(isCashLike, () => defaultBankAccount(db), 'Where did the proceeds go? I assumed %s.');
+        (await resolveAccount(db, interp.paymentAccountId ?? undefined, (a) => a.type === 'asset' && !isCashLike(a))) ??
+        (await resolveAccount(db, interp.paymentAccount ?? undefined, (a) => a.type === 'asset' && !isCashLike(a))) ??
+        (await firstOrAsk(db, (a) => a.subtype === 'personal_asset', clar, 'Which asset was sold? I assumed %s.'));
+      const to = await dest(isCashLike, () => defaultBankAccount(db), 'Where did the proceeds go? I assumed %s.');
       let book = interp.costBasis ?? null;
       if (book === null && asset) {
-        const bal = db
+        const bal = (await db
           .prepare('SELECT COALESCE(SUM(l.debit - l.credit),0) AS b FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id WHERE l.account_id = ? AND e.date <= ? AND e.user_id = ?')
-          .get(asset.id, date, USER_ID) as { b: number };
+          .get(asset.id, date, USER_ID)) as { b: number };
         book = fromCents(bal.b) / rate;
         if (book > 0) clar.push(`I used the full book value of ${asset.name} (${fmt(book)}) as the cost of the asset sold. Adjust if only part was sold.`);
       }
@@ -348,81 +348,81 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
       dr(to, amount);
       cr(asset, book);
       const gain = round2(amount - book);
-      if (gain > 0) cr(bySubtype(db, 'other_income'), gain, { memo: 'Gain on sale' });
-      if (gain < 0) dr(bySubtype(db, 'other_expense'), -gain, { memo: 'Loss on sale' });
+      if (gain > 0) cr((await bySubtype(db, 'other_income')), gain, { memo: 'Gain on sale' });
+      if (gain < 0) dr((await bySubtype(db, 'other_expense')), -gain, { memo: 'Loss on sale' });
       descr ||= `Sale of ${asset?.name ?? 'asset'}`;
       break;
     }
     case 'liability_increase': {
-      const liab = dest((a) => a.type === 'liability', () => bySubtype(db, 'accounts_payable'), 'Which liability increased? I used %s.');
-      const cat = category((a) => a.type === 'expense' || a.type === 'asset', 'other_expense', 'What was this for? I used %s.');
+      const liab = await dest((a) => a.type === 'liability', () => bySubtype(db, 'accounts_payable'), 'Which liability increased? I used %s.');
+      const cat = await category((a) => a.type === 'expense' || a.type === 'asset', 'other_expense', 'What was this for? I used %s.');
       dr(cat, amount);
       cr(liab, amount);
       descr ||= `${cat?.name ?? 'Charge'} owed${merchant ? ` to ${merchant}` : ''}`;
       break;
     }
     case 'liability_reduction': {
-      const liab = dest((a) => a.type === 'liability', () => firstOrAsk(db, (a) => a.type === 'liability', [], ''), 'Which liability was paid down? I assumed %s.');
-      const from = resolveAccount(db, interp.paymentAccountId ?? undefined, isCashLike) ?? resolveAccount(db, interp.paymentAccount ?? undefined, isCashLike) ?? withAsk(defaultBankAccount(db), clar, 'Which account was used? I assumed %s.');
+      const liab = await dest((a) => a.type === 'liability', () => firstOrAsk(db, (a) => a.type === 'liability', [], ''), 'Which liability was paid down? I assumed %s.');
+      const from = (await resolveAccount(db, interp.paymentAccountId ?? undefined, isCashLike)) ?? (await resolveAccount(db, interp.paymentAccount ?? undefined, isCashLike)) ?? withAsk((await defaultBankAccount(db)), clar, 'Which account was used? I assumed %s.');
       dr(liab, amount);
       cr(from, amount);
       descr ||= `Payment on ${liab?.name ?? 'liability'}`;
       break;
     }
     case 'refund': {
-      const cat = category(isExpense, 'other_expense', 'Which expense is being refunded? I used %s.');
-      const to = resolveAccount(db, interp.destinationAccountId ?? undefined, isPaymentSource) ?? resolveAccount(db, interp.destinationAccount ?? undefined, isPaymentSource) ?? pay();
+      const cat = await category(isExpense, 'other_expense', 'Which expense is being refunded? I used %s.');
+      const to = (await resolveAccount(db, interp.destinationAccountId ?? undefined, isPaymentSource)) ?? (await resolveAccount(db, interp.destinationAccount ?? undefined, isPaymentSource)) ?? (await pay());
       dr(to, amount);
       cr(cat, amount);
       descr ||= `Refund${merchant ? ` from ${merchant}` : ''}`;
       break;
     }
     case 'reimbursement': {
-      let cat = resolveAccount(db, interp.categoryAccountId ?? undefined) ?? resolveAccount(db, interp.category ?? undefined, (a) => a.type === 'expense' || a.subtype === 'accounts_receivable');
+      let cat = (await resolveAccount(db, interp.categoryAccountId ?? undefined)) ?? (await resolveAccount(db, interp.category ?? undefined, (a) => a.type === 'expense' || a.subtype === 'accounts_receivable'));
       if (!cat) {
-        cat = bySubtype(db, 'accounts_receivable');
+        cat = await bySubtype(db, 'accounts_receivable');
         if (cat) clar.push(`Was this reimbursing an expense you recorded, or settling money owed to you? I credited ${cat.name}.`);
       }
-      const to = dest(isPaymentSource, () => defaultBankAccount(db), 'Which account received the reimbursement? I assumed %s.');
+      const to = await dest(isPaymentSource, () => defaultBankAccount(db), 'Which account received the reimbursement? I assumed %s.');
       dr(to, amount);
       cr(cat, amount);
       descr ||= `Reimbursement${merchant ? ` from ${merchant}` : ''}`;
       break;
     }
     case 'owner_contribution': {
-      const to = dest((a) => a.type === 'asset', () => defaultBankAccount(db), 'Which account received the contribution? I assumed %s.');
+      const to = await dest((a) => a.type === 'asset', () => defaultBankAccount(db), 'Which account received the contribution? I assumed %s.');
       dr(to, amount);
-      cr(bySubtype(db, 'owner_contribution'), amount);
+      cr((await bySubtype(db, 'owner_contribution')), amount);
       descr ||= 'Owner contribution';
       break;
     }
     case 'owner_withdrawal': {
-      const from = pay();
-      dr(bySubtype(db, 'owner_withdrawal'), amount);
+      const from = await pay();
+      dr((await bySubtype(db, 'owner_withdrawal')), amount);
       cr(from, amount);
       descr ||= 'Owner withdrawal';
       break;
     }
     case 'opening_balance': {
       const acct =
-        resolveAccount(db, interp.destinationAccountId ?? undefined) ??
-        resolveAccount(db, interp.destinationAccount ?? undefined) ??
-        resolveAccount(db, interp.paymentAccountId ?? undefined) ??
-        resolveAccount(db, interp.paymentAccount ?? undefined);
+        (await resolveAccount(db, interp.destinationAccountId ?? undefined)) ??
+        (await resolveAccount(db, interp.destinationAccount ?? undefined)) ??
+        (await resolveAccount(db, interp.paymentAccountId ?? undefined)) ??
+        (await resolveAccount(db, interp.paymentAccount ?? undefined));
       if (!acct) clar.push('Which account is this opening balance for?');
-      const obe = bySubtype(db, 'opening_balance_equity');
+      const obe = await bySubtype(db, 'opening_balance_equity');
       if (acct?.type === 'liability') (dr(obe, amount), cr(acct, amount));
       else (dr(acct, amount), cr(obe, amount));
       descr ||= `Opening balance — ${acct?.name ?? 'account'}`;
       break;
     }
     case 'adjustment': {
-      const acct = resolveAccount(db, interp.destinationAccountId ?? undefined) ?? resolveAccount(db, interp.destinationAccount ?? undefined) ?? resolveAccount(db, interp.paymentAccount ?? undefined);
+      const acct = (await resolveAccount(db, interp.destinationAccountId ?? undefined)) ?? (await resolveAccount(db, interp.destinationAccount ?? undefined)) ?? (await resolveAccount(db, interp.paymentAccount ?? undefined));
       if (!acct) clar.push('Which account needs adjusting?');
       const increase = interp.direction !== 'decrease';
       if (!interp.direction) clar.push('Should the balance increase or decrease? I assumed increase.');
       const debitSide = acct ? (acct.type === 'asset' || acct.type === 'expense') === increase : true;
-      const offset = debitSide ? bySubtype(db, 'other_income') : bySubtype(db, 'other_expense');
+      const offset = debitSide ? (await bySubtype(db, 'other_income')) : (await bySubtype(db, 'other_expense'));
       if (debitSide) (dr(acct, amount), cr(offset, amount));
       else (dr(offset, amount), cr(acct, amount));
       descr ||= `Balance adjustment — ${acct?.name ?? 'account'}`;
@@ -482,20 +482,20 @@ export function buildProposal(db: DB, interp: Interpretation, engine: 'rules' | 
   };
 }
 
-function merchantRule(db: DB, merchant: string, pred: (a: Account) => boolean): Account | undefined {
+async function merchantRule(db: DB, merchant: string, pred: (a: Account) => boolean): Promise<Account | undefined> {
   const m = merchant.toLowerCase();
-  const rules = db.prepare('SELECT pattern, account_id FROM merchant_rules WHERE user_id = ? ORDER BY length(pattern) DESC').all(USER_ID) as Array<{ pattern: string; account_id: number }>;
+  const rules = await db.prepare('SELECT pattern, account_id FROM merchant_rules WHERE user_id = ? ORDER BY length(pattern) DESC').all(USER_ID) as Array<{ pattern: string; account_id: number }>;
   for (const r of rules) {
     if (m.includes(r.pattern) || r.pattern.includes(m)) {
-      const a = getAccount(db, r.account_id);
+      const a = await getAccount(db, r.account_id);
       if (a && a.is_active && pred(a)) return a;
     }
   }
   return undefined;
 }
 
-function firstOrAsk(db: DB, pred: (a: Account) => boolean, clar: string[], q: string): Account | undefined {
-  const matches = listAccounts(db, false).filter(pred);
+async function firstOrAsk(db: DB, pred: (a: Account) => boolean, clar: string[], q: string): Promise<Account | undefined> {
+  const matches = (await listAccounts(db, false)).filter(pred);
   if (matches.length && q) clar.push(q.replace('%s', matches[0].name));
   return matches[0];
 }

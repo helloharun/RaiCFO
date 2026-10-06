@@ -1,18 +1,15 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import Database from 'better-sqlite3';
-import type { DB } from '../db.js';
-import type { AppConfig } from '../config.js';
-import { audit } from '../engine/ledger.js';
+import { resetSequences, type DB } from '../db.js';
+import { ValidationError } from '../types.js';
 
 const MAGIC = Buffer.from('PFHQENC1');
-export const BACKUP_NAME = /^finance-\d{8}-\d{6}-[a-z]{1,12}\.db(\.enc)?$/;
+export const BACKUP_FORMAT = 'pfhq-backup-v2';
 
-function stamp(d = new Date()) {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-}
+/** Restore order respects foreign keys; sessions are never exported. */
+export const BACKUP_TABLES = [
+  'users', 'accounts', 'securities', 'journal_entries', 'journal_lines', 'reconciliations', 'budgets',
+  'recurring_transactions', 'merchant_rules', 'fx_rates', 'goals', 'settings', 'audit_log',
+] as const;
 
 function keyFor(secret: string, salt: Buffer) {
   return scryptSync(secret, salt, 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 256 * 1024 * 1024 });
@@ -37,81 +34,63 @@ export function decryptBuffer(data: Buffer, secret: string): Buffer {
   return Buffer.concat([d.update(data.subarray(o)), d.final()]);
 }
 
-function ensureDir(dir: string) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+export interface Backup {
+  format: typeof BACKUP_FORMAT;
+  createdAt: string;
+  tables: Record<string, Record<string, unknown>[]>;
 }
 
-/** Consistent online snapshot of the database to a temporary file (caller deletes it). */
-export async function snapshot(db: DB, dir: string): Promise<string> {
-  ensureDir(dir);
-  const tmp = path.join(dir, `tmp-${process.pid}-${randomBytes(6).toString('hex')}.db`);
-  await db.backup(tmp);
-  fs.chmodSync(tmp, 0o600);
-  return tmp;
+/** Complete, restorable snapshot of every table (read in one transaction for consistency). */
+export async function createBackup(db: DB): Promise<Backup> {
+  return db.transaction(async () => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const tables: Backup['tables'] = {};
+    for (const t of BACKUP_TABLES) tables[t] = (await db.query(`SELECT * FROM ${t} ORDER BY 1`)).rows;
+    return { format: BACKUP_FORMAT as typeof BACKUP_FORMAT, createdAt: new Date().toISOString(), tables };
+  })();
 }
 
-export async function createBackup(db: DB, cfg: AppConfig, reason = 'manual') {
-  const tag = reason.toLowerCase().replace(/[^a-z]/g, '').slice(0, 12) || 'manual';
-  const tmp = await snapshot(db, cfg.backupDir);
-  try {
-    let name = `finance-${stamp()}-${tag}.db`;
-    const target = () => path.join(cfg.backupDir, name);
-    if (cfg.BACKUP_ENCRYPTION_KEY) {
-      name += '.enc';
-      fs.writeFileSync(target(), encryptBuffer(fs.readFileSync(tmp), cfg.BACKUP_ENCRYPTION_KEY), { mode: 0o600 });
-    } else {
-      fs.renameSync(tmp, target());
+export function parseBackup(buf: Buffer, secret?: string): Backup {
+  let raw = buf;
+  if (buf.subarray(0, MAGIC.length).equals(MAGIC)) {
+    if (!secret) throw new ValidationError('This backup is encrypted; BACKUP_ENCRYPTION_KEY is required.');
+    raw = decryptBuffer(buf, secret);
+  }
+  const data = JSON.parse(raw.toString('utf8')) as Backup;
+  if (data?.format !== BACKUP_FORMAT || typeof data.tables !== 'object') throw new ValidationError('Not a Personal Finance HQ backup file.');
+  return data;
+}
+
+/**
+ * Restores a backup into a database whose ledger is empty. Existing non-ledger rows (seeded accounts, settings…) are replaced.
+ * Column names come from the live schema, never from the file.
+ */
+export async function restoreBackup(db: DB, data: Backup) {
+  return db.transaction(async () => {
+    const posted = (await db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get()) as { n: number };
+    if (posted.n > 0) throw new ValidationError('The target database already has journal entries. Restore into a new, empty database.');
+    for (const t of [...BACKUP_TABLES].reverse()) if (t !== 'journal_entries' && t !== 'journal_lines' && t !== 'audit_log') await db.query(`DELETE FROM ${t}`);
+    const counts: Record<string, number> = {};
+    for (const t of BACKUP_TABLES) {
+      const rows = Array.isArray(data.tables[t]) ? data.tables[t] : [];
+      const cols = (
+        await db.query('SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1', [t])
+      ).rows.map((r) => r.column_name as string);
+      const deferred = t === 'accounts' ? ['parent_id'] : t === 'journal_entries' ? ['reversal_of', 'reversed_by'] : [];
+      for (const row of rows) {
+        const use = cols.filter((c) => c in row && !deferred.includes(c));
+        await db.query(
+          `INSERT INTO ${t} (${use.map((c) => `"${c}"`).join(', ')}) VALUES (${use.map((_, i) => `$${i + 1}`).join(', ')})`,
+          use.map((c) => row[c]),
+        );
+      }
+      for (const row of rows) {
+        const set = deferred.filter((c) => row[c] !== null && row[c] !== undefined);
+        if (set.length) await db.query(`UPDATE ${t} SET ${set.map((c, i) => `"${c}" = $${i + 2}`).join(', ')} WHERE id = $1`, [row.id, ...set.map((c) => row[c])]);
+      }
+      counts[t] = rows.length;
     }
-    pruneBackups(cfg);
-    audit(db, 'backup', 'database', null, { name, reason: tag });
-    return { name, size: fs.statSync(target()).size, encrypted: Boolean(cfg.BACKUP_ENCRYPTION_KEY) };
-  } finally {
-    if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-  }
-}
-
-export function listBackups(cfg: AppConfig) {
-  if (!fs.existsSync(cfg.backupDir)) return [];
-  return fs
-    .readdirSync(cfg.backupDir)
-    .filter((f) => BACKUP_NAME.test(f))
-    .map((f) => {
-      const st = fs.statSync(path.join(cfg.backupDir, f));
-      return { name: f, size: st.size, createdAt: st.mtime.toISOString(), encrypted: f.endsWith('.enc') };
-    })
-    .sort((a, b) => b.name.localeCompare(a.name));
-}
-
-/** Resolves a backup name to a path inside the backup directory, rejecting anything else (path traversal). */
-export function backupPath(cfg: AppConfig, name: string): string | null {
-  if (typeof name !== 'string' || !BACKUP_NAME.test(name) || path.basename(name) !== name) return null;
-  const p = path.join(cfg.backupDir, name);
-  return path.dirname(p) === path.resolve(cfg.backupDir) && fs.existsSync(p) ? p : null;
-}
-
-export function pruneBackups(cfg: AppConfig) {
-  const all = listBackups(cfg);
-  for (const b of all.slice(cfg.BACKUP_RETENTION)) fs.unlinkSync(path.join(cfg.backupDir, b.name));
-}
-
-/** Verifies a SQLite file is intact and looks like a Personal Finance HQ database. */
-export function verifyDatabaseFile(file: string) {
-  const db = new Database(file, { readonly: true, fileMustExist: true });
-  try {
-    const ok = (db.pragma('integrity_check', { simple: true }) as string) === 'ok';
-    const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name));
-    const hasTables = ['accounts', 'journal_entries', 'journal_lines'].every((t) => tables.has(t));
-    return { ok: ok && hasTables, integrity: ok, hasTables };
-  } finally {
-    db.close();
-  }
-}
-
-export function scheduleBackups(db: DB, cfg: AppConfig) {
-  if (!cfg.BACKUP_INTERVAL_HOURS || cfg.dbPath === ':memory:') return;
-  const intervalMs = cfg.BACKUP_INTERVAL_HOURS * 3_600_000;
-  const run = () => createBackup(db, cfg, 'auto').catch((e) => console.error('Automatic backup failed:', (e as Error).message));
-  const latest = listBackups(cfg)[0];
-  if (!latest || Date.now() - new Date(latest.createdAt).getTime() > intervalMs) setTimeout(run, 5_000).unref();
-  setInterval(run, intervalMs).unref();
+    await resetSequences(db);
+    return counts;
+  })();
 }

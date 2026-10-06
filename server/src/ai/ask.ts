@@ -56,13 +56,13 @@ export interface AskAnswer {
   data?: unknown;
 }
 
-export function ruleAsk(db: DB, question: string, today = todayISO()): AskAnswer {
+export async function ruleAsk(db: DB, question: string, today = todayISO()): Promise<AskAnswer> {
   const q = question.toLowerCase();
   const p = parsePeriod(q, today);
-  const accts = listAccounts(db);
+  const accts = await listAccounts(db);
 
   if (/net worth|worth/.test(q)) {
-    const nw = netWorthStatement(db, today);
+    const nw = await netWorthStatement(db, today);
     return {
       engine: 'rules',
       answer: `Your net worth is ${money(nw.netWorth)} at book value (${money(nw.netWorthMarket)} at market value): assets ${money(nw.totalAssets)} minus liabilities ${money(nw.totalLiabilities)}.`,
@@ -70,12 +70,12 @@ export function ruleAsk(db: DB, question: string, today = todayISO()): AskAnswer
     };
   }
   if (/savings rate|saving rate|how much (did|have) i save/.test(q)) {
-    const is = incomeStatement(db, p.from, p.to);
+    const is = await incomeStatement(db, p.from, p.to);
     const rate = is.savingsRate === null ? 'n/a' : `${(is.savingsRate * 100).toFixed(1)}%`;
     return { engine: 'rules', answer: `For ${p.label} you earned ${money(is.totalIncome)}, spent ${money(is.totalExpenses)} and saved ${money(is.netIncome)} — a savings rate of ${rate}.`, data: is };
   }
   if (/budget/.test(q)) {
-    const b = budgetStatus(db, p.from.slice(0, 7));
+    const b = await budgetStatus(db, p.from.slice(0, 7));
     const over = b.rows.filter((r) => r.budget > 0 && r.actual > r.budget);
     return {
       engine: 'rules',
@@ -86,12 +86,12 @@ export function ruleAsk(db: DB, question: string, today = todayISO()): AskAnswer
     };
   }
   if (/\b(debt|owe|liabilit)/.test(q)) {
-    const bs = balanceSheet(db, today);
+    const bs = await balanceSheet(db, today);
     const rows = bs.liabilities.flatMap((g) => g.rows);
     return { engine: 'rules', answer: `You owe ${money(bs.totalLiabilities)} in total${rows.length ? `: ${rows.map((r) => `${r.name} ${money(r.amount)}`).join(', ')}` : ''}.`, data: rows };
   }
   if (/top|biggest|largest|most/.test(q) && /(expense|spend|categor)/.test(q)) {
-    const is = incomeStatement(db, p.from, p.to);
+    const is = await incomeStatement(db, p.from, p.to);
     const top = is.expenses.slice(0, 5);
     return { engine: 'rules', answer: top.length ? `Top spending categories for ${p.label}: ${top.map((r, i) => `${i + 1}. ${r.name} ${money(r.amount)}`).join('; ')}.` : `No expenses recorded for ${p.label}.`, data: top };
   }
@@ -101,42 +101,42 @@ export function ruleAsk(db: DB, question: string, today = todayISO()): AskAnswer
   });
   const namedFlow = named.filter((a) => a.type === 'expense' || a.type === 'income');
   if (/(spen|spent|cost|pay|paid|expense|earn|income|make|made)/.test(q) && namedFlow.length) {
-    const bal = accountBalances(db, { from: p.from, to: p.to });
+    const bal = await accountBalances(db, { from: p.from, to: p.to });
     const parts = namedFlow.map((a) => `${a.name}: ${money(bal.get(a.id)?.balance ?? 0)}`);
     const total = namedFlow.reduce((s, a) => s + (bal.get(a.id)?.balance ?? 0), 0);
     return { engine: 'rules', answer: `For ${p.label} (${p.from} to ${p.to}) — ${parts.join(', ')}${namedFlow.length > 1 ? `; total ${money(total)}` : ''}.`, data: { period: p, total } };
   }
   const namedBal = named.filter((a) => a.type === 'asset' || a.type === 'liability');
   if (namedBal.length && /(balance|how much|have|left|owe|in my)/.test(q)) {
-    const bal = accountBalances(db, { to: today });
+    const bal = await accountBalances(db, { to: today });
     return { engine: 'rules', answer: namedBal.map((a) => `${a.name}: ${money(bal.get(a.id)?.balance ?? 0)}${a.type === 'liability' ? ' owing' : ''}`).join('; ') + '.' };
   }
   if (/(spen|spent|expense|cost)/.test(q)) {
-    const is = incomeStatement(db, p.from, p.to);
+    const is = await incomeStatement(db, p.from, p.to);
     return { engine: 'rules', answer: `You spent ${money(is.totalExpenses)} in ${p.label}. Largest: ${is.expenses.slice(0, 3).map((r) => `${r.name} ${money(r.amount)}`).join(', ') || 'none'}.`, data: is };
   }
   if (/(earn|income|made|make)/.test(q)) {
-    const is = incomeStatement(db, p.from, p.to);
+    const is = await incomeStatement(db, p.from, p.to);
     return { engine: 'rules', answer: `You earned ${money(is.totalIncome)} in ${p.label}${is.income.length ? ` (${is.income.map((r) => `${r.name} ${money(r.amount)}`).join(', ')})` : ''}.`, data: is };
   }
   if (/cash|liquid|bank/.test(q)) {
-    const nw = netWorthStatement(db, today);
+    const nw = await netWorthStatement(db, today);
     return { engine: 'rules', answer: `You have ${money(nw.liquidAssets)} in cash and bank accounts.` };
   }
-  const nw = netWorthStatement(db, today);
-  const is = incomeStatement(db, monthStart(today), today);
+  const nw = await netWorthStatement(db, today);
+  const is = await incomeStatement(db, monthStart(today), today);
   return {
     engine: 'rules',
     answer: `Here's a snapshot: net worth ${money(nw.netWorth)}, cash ${money(nw.liquidAssets)}, this month income ${money(is.totalIncome)} vs. expenses ${money(is.totalExpenses)}. Try asking "How much did I spend on groceries last month?", "What's my savings rate this year?", "Am I over budget?" or "How much do I owe?".`,
   };
 }
 
-function financialContext(db: DB, today: string): string {
-  const nw = netWorthStatement(db, today);
+async function financialContext(db: DB, today: string): Promise<string> {
+  const nw = await netWorthStatement(db, today);
   const months: unknown[] = [];
   for (let i = 5; i >= 0; i--) {
     const s = addMonths(monthStart(today), -i);
-    const is = incomeStatement(db, s, i === 0 ? today : monthEnd(s));
+    const is = await incomeStatement(db, s, i === 0 ? today : monthEnd(s));
     months.push({
       month: s.slice(0, 7),
       income: fromCents(is.totalIncome),
@@ -146,7 +146,7 @@ function financialContext(db: DB, today: string): string {
     });
   }
   const balances = [...nw.assets.flatMap((g) => g.rows), ...nw.liabilities.flatMap((g) => g.rows)].map((r) => ({ account: r.name, balance: fromCents(r.amount) }));
-  const b = budgetStatus(db, today.slice(0, 7));
+  const b = await budgetStatus(db, today.slice(0, 7));
   return JSON.stringify({
     today,
     currency: 'CAD',
@@ -165,12 +165,12 @@ export async function ask(db: DB, question: string, today = todayISO()): Promise
   try {
     const answer = await chat(
       'You are a careful personal CFO and financial analyst. Answer ONLY from the ledger-derived data provided (amounts in CAD). If the data is insufficient, say so. Be concise, use specific numbers, and give practical observations. Do not give regulated investment advice.',
-      `Ledger data: ${financialContext(db, today)}\n\nQuestion: ${question}`,
+      `Ledger data: ${(await financialContext(db, today))}\n\nQuestion: ${question}`,
       false,
     );
     return { answer, engine: 'llm' };
   } catch (e) {
-    const r = ruleAsk(db, question, today);
+    const r = await ruleAsk(db, question, today);
     return { ...r, answer: `${r.answer}\n\n(AI unavailable: ${(e as Error).message})` };
   }
 }

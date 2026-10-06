@@ -75,7 +75,7 @@ export function createApp(db: DB, cfg: AppConfig, opts: { clientDist?: string | 
   }
 
   app.use(errorHandler);
-  const timer = setInterval(() => auth.cleanup(), 10 * 60_000);
+  const timer = setInterval(() => auth.cleanup().catch((e) => console.error('Session cleanup failed:', (e as Error).message)), 10 * 60_000);
   timer.unref();
   return app;
 }
@@ -86,7 +86,12 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   const e = err as { type?: string; status?: number; code?: string; message?: string };
   if (e?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Malformed JSON body.' });
   if (e?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large.' });
-  if (typeof e?.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT')) return res.status(400).json({ error: 'The change violates a data integrity rule.' });
+  if (typeof e?.code === 'string') {
+    // Postgres: P0001 = raised by our ledger-protection triggers (safe, fixed messages); 23xxx = constraint violations; 22xxx = bad data.
+    if (e.code === 'P0001') return res.status(400).json({ error: String((err as Error).message) });
+    if (e.code.startsWith('23')) return res.status(400).json({ error: 'The change violates a data integrity rule.' });
+    if (e.code.startsWith('22')) return res.status(400).json({ error: 'Invalid value.' });
+  }
   if (e?.status && e.status >= 400 && e.status < 500) return res.status(e.status).json({ error: 'Bad request.' });
   console.error(err);
   res.status(500).json({ error: 'Internal server error.' });

@@ -1,23 +1,22 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { openDb, type DB } from './db.js';
+import type { DB } from './db.js';
+import { openTestDb, testDatabaseUrl } from './testDb.js';
 import { seedIfEmpty } from './seed.js';
-import { parseConfig, setConfig } from './config.js';
+import { dbOptions, parseConfig, setConfig } from './config.js';
 import { createApp } from './app.js';
 import { hashPassword } from './security/password.js';
 import { csvCell } from './security/csv.js';
-import { backupPath, decryptBuffer, encryptBuffer } from './features/backup.js';
+import { createBackup, decryptBuffer, encryptBuffer, parseBackup, restoreBackup } from './features/backup.js';
+import { trialBalance } from './engine/reports.js';
 import { sanitizeInterpretation, llmConfig } from './ai/llm.js';
 
 const PASSWORD = 'correct horse battery staple';
 let server: Server;
 let base: string;
 let db: DB;
-let tmpDir: string;
+let dropDb: () => Promise<void>;
 
 async function req(p: string, opts: { method?: string; body?: unknown; cookie?: string; csrf?: string; headers?: Record<string, string> } = {}) {
   const headers: Record<string, string> = { ...(opts.headers ?? {}) };
@@ -43,37 +42,44 @@ async function login() {
 }
 
 beforeAll(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pfhq-test-'));
   const cfg = parseConfig({
     NODE_ENV: 'test',
     APP_USERNAME: 'owner',
     APP_PASSWORD_HASH: await hashPassword(PASSWORD),
     SESSION_SECRET: 'x'.repeat(48),
     LOGIN_MAX_ATTEMPTS: '3',
-    DB_PATH: path.join(tmpDir, 'test.db'),
-    BACKUP_DIR: path.join(tmpDir, 'backups'),
-    BACKUP_INTERVAL_HOURS: '0',
+    DATABASE_URL: testDatabaseUrl(),
   });
   setConfig(cfg);
-  db = openDb(cfg.dbPath);
-  seedIfEmpty(db);
+  const t = await openTestDb();
+  db = t.db;
+  dropDb = t.drop;
+  await seedIfEmpty(db);
   server = createApp(db, cfg, { clientDist: null }).listen(0, '127.0.0.1');
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
-afterAll(() => {
+afterAll(async () => {
   server?.close();
-  db?.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  await dropDb?.();
 });
 
 describe('configuration', () => {
   it('refuses to start without credentials or a strong session secret', () => {
-    expect(() => parseConfig({ APP_USERNAME: 'a', SESSION_SECRET: 'x'.repeat(40) })).toThrow(/APP_PASSWORD_HASH/);
-    expect(() => parseConfig({ APP_USERNAME: 'a', APP_PASSWORD: 'long-enough-password', SESSION_SECRET: 'short' })).toThrow(/SESSION_SECRET/);
-    expect(() => parseConfig({ APP_USERNAME: 'a', APP_PASSWORD: 'long-enough-password', SESSION_SECRET: 'change-me-generate-a-long-random-secret' })).toThrow(/placeholder/);
-    expect(() => parseConfig({ APP_USERNAME: 'a', APP_PASSWORD: 'short', SESSION_SECRET: 'y'.repeat(40) })).toThrow(/12 characters/);
+    expect(() => parseConfig({ APP_USERNAME: 'a', SESSION_SECRET: 'x'.repeat(40) , DATABASE_URL: 'postgres://u:p@localhost/db' })).toThrow(/APP_PASSWORD_HASH/);
+    expect(() => parseConfig({ APP_USERNAME: 'a', APP_PASSWORD: 'long-enough-password', SESSION_SECRET: 'short' , DATABASE_URL: 'postgres://u:p@localhost/db' })).toThrow(/SESSION_SECRET/);
+    expect(() => parseConfig({ APP_USERNAME: 'a', APP_PASSWORD: 'long-enough-password', SESSION_SECRET: 'change-me-generate-a-long-random-secret' , DATABASE_URL: 'postgres://u:p@localhost/db' })).toThrow(/placeholder/);
+    expect(() => parseConfig({ APP_USERNAME: 'a', APP_PASSWORD: 'short', SESSION_SECRET: 'y'.repeat(40) , DATABASE_URL: 'postgres://u:p@localhost/db' })).toThrow(/12 characters/);
+  });
+  it('requires a Postgres DATABASE_URL and enables TLS for remote hosts', () => {
+    const ok = { APP_USERNAME: 'a', APP_PASSWORD: 'long-enough-password', SESSION_SECRET: 'y'.repeat(40) };
+    expect(() => parseConfig(ok)).toThrow(/DATABASE_URL/);
+    expect(() => parseConfig({ ...ok, DATABASE_URL: 'mysql://x@y/z' })).toThrow(/postgres/);
+    const remote = parseConfig({ ...ok, DATABASE_URL: 'postgresql://u:p@db.abc.supabase.co:5432/postgres?sslmode=disable' });
+    expect(dbOptions(remote).ssl).toBe('require');
+    expect(dbOptions(parseConfig({ ...ok, DATABASE_URL: 'postgres://u:p@localhost/db' })).ssl).toBe(false);
+    expect(() => parseConfig({ ...ok, DATABASE_URL: 'postgres://u:p@h/db', DATABASE_SSL: 'verify-full' })).toThrow(/DATABASE_CA_CERT/);
   });
   it('picks Groq when GROQ_API_KEY is set', () => {
     expect(llmConfig({ GROQ_API_KEY: 'gsk_test' })).toMatchObject({ provider: 'groq', model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' });
@@ -84,7 +90,7 @@ describe('configuration', () => {
 
 describe('authentication', () => {
   it('blocks every API route without a session', async () => {
-    for (const p of ['/api/accounts', '/api/journal', '/api/export/journal.csv', '/api/export/ledger.json', '/api/export/database.sqlite', '/api/meta', '/api/backups', '/api/audit']) {
+    for (const p of ['/api/accounts', '/api/journal', '/api/export/journal.csv', '/api/export/ledger.json', '/api/export/backup.json', '/api/export/backup.json.enc', '/api/meta', '/api/backups', '/api/audit']) {
       const r = await req(p);
       expect(r.res.status, p).toBe(401);
     }
@@ -145,7 +151,7 @@ describe('hardening', () => {
   beforeAll(() => {
     // fresh app instance has its own lockout table; sessions live in the DB
     return (async () => {
-      const row = db.prepare('SELECT 1').get();
+      const row = await db.prepare('SELECT 1').get();
       expect(row).toBeTruthy();
     })();
   });
@@ -160,7 +166,7 @@ describe('hardening', () => {
   });
 
   it('handles malformed input without leaking internals', async () => {
-    db.prepare('DELETE FROM sessions').run();
+    await db.prepare('DELETE FROM sessions').run();
     // lockout is per-IP in memory; use the session table directly to obtain a session for these tests
     const { AuthService } = await import('./security/auth.js');
     const { getConfig } = await import('./config.js');
@@ -180,21 +186,21 @@ describe('hardening', () => {
   });
 
   it('cannot bypass ledger validation by spoofing the reversal source', async () => {
-    const acct = (code: string) => (db.prepare('SELECT id FROM accounts WHERE code = ?').get(code) as { id: number }).id;
+    const acct = async (code: string) => (await db.prepare('SELECT id FROM accounts WHERE code = ?').get(code) as { id: number }).id;
     const r = await req('/api/journal', {
       cookie: s.cookie,
       csrf: s.csrf,
-      body: { date: '2026-01-05', description: 'spoof', source: 'reversal', lines: [{ accountId: acct('1100'), credit: 100, symbol: 'XEQT', quantity: -100 }, { accountId: acct('1010'), debit: 100 }] },
+      body: { date: '2026-01-05', description: 'spoof', source: 'reversal', lines: [{ accountId: (await acct('1100')), credit: 100, symbol: 'XEQT', quantity: -100 }, { accountId: (await acct('1010')), debit: 100 }] },
     });
     expect(r.res.status).toBe(400);
     expect(r.json.error).toMatch(/Cannot sell/);
-    const unbalanced = await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-05', description: 'x', lines: [{ accountId: acct('1010'), debit: 10 }, { accountId: acct('4000'), credit: 9 }] } });
+    const unbalanced = await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-05', description: 'x', lines: [{ accountId: (await acct('1010')), debit: 10 }, { accountId: (await acct('4000')), credit: 9 }] } });
     expect(unbalanced.res.status).toBe(400);
   });
 
-  it('exports the ledger in CSV/JSON/SQLite and neutralises formula injection', { timeout: 15000 }, async () => {
-    const acct = (code: string) => (db.prepare('SELECT id FROM accounts WHERE code = ?').get(code) as { id: number }).id;
-    const post = await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-06', description: '=HYPERLINK("http://evil")', lines: [{ accountId: acct('5100'), debit: 12.5 }, { accountId: acct('1010'), credit: 12.5 }] } });
+  it('exports the ledger in CSV/JSON/backup formats and neutralises formula injection', { timeout: 15000 }, async () => {
+    const acct = async (code: string) => (await db.prepare('SELECT id FROM accounts WHERE code = ?').get(code) as { id: number }).id;
+    const post = await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-06', description: '=HYPERLINK("http://evil")', lines: [{ accountId: (await acct('5100')), debit: 12.5 }, { accountId: (await acct('1010')), credit: 12.5 }] } });
     expect(post.res.status).toBe(200);
     const csv = await req('/api/export/journal.csv', { cookie: s.cookie });
     expect(csv.text).toContain(`"'=HYPERLINK(""http://evil"")"`);
@@ -206,36 +212,63 @@ describe('hardening', () => {
     const json = await req('/api/export/ledger.json', { cookie: s.cookie });
     expect(json.json.journalLines.length).toBeGreaterThan(0);
     expect(JSON.stringify(json.json)).not.toMatch(/csrf|cred_fp/);
-    const sqlite = await fetch(base + '/api/export/database.sqlite', { headers: { cookie: s.cookie } });
-    expect(Buffer.from(await sqlite.arrayBuffer()).subarray(0, 15).toString()).toBe('SQLite format 3');
+    const backup = await req('/api/export/backup.json', { cookie: s.cookie });
+    expect(backup.res.headers.get('content-disposition')).toMatch(/attachment/);
+    expect(backup.json.format).toBe('pfhq-backup-v2');
+    expect(backup.json.tables.journal_lines.length).toBeGreaterThan(0);
+    expect(backup.json.tables.sessions).toBeUndefined();
+    expect(backup.text).not.toMatch(/csrf|cred_fp/);
+    expect((await req('/api/export/backup.json.enc', { cookie: s.cookie })).res.status).toBe(400);
   });
 
-  it('protects the ledger at the database level', () => {
-    expect(() => db.prepare('DELETE FROM journal_entries').run()).toThrow(/cannot be deleted/);
-    expect(() => db.prepare('UPDATE journal_lines SET debit = 1').run()).toThrow(/immutable/);
-    expect(() => db.prepare('DELETE FROM audit_log').run()).toThrow(/append-only/);
+  it('protects the ledger at the database level', async () => {
+    await expect(db.prepare('DELETE FROM journal_entries').run()).rejects.toThrow(/cannot be deleted/);
+    await expect(db.prepare('DELETE FROM journal_lines').run()).rejects.toThrow(/cannot be deleted/);
+    await expect(db.prepare('UPDATE journal_lines SET debit = 1').run()).rejects.toThrow(/immutable/);
+    await expect(db.prepare('UPDATE journal_lines SET account_id = account_id + 1').run()).rejects.toThrow(/immutable/);
+    await expect(db.prepare('DELETE FROM audit_log').run()).rejects.toThrow(/append-only/);
+    await expect(db.prepare("UPDATE audit_log SET action = 'x'").run()).rejects.toThrow(/append-only/);
+    await expect(db.exec('TRUNCATE journal_lines, journal_entries')).rejects.toThrow(/truncated/);
+    await expect(db.exec('TRUNCATE audit_log')).rejects.toThrow(/append-only/);
+    // reconciliation metadata stays editable
+    expect((await db.prepare('UPDATE journal_lines SET cleared = cleared WHERE id = (SELECT MIN(id) FROM journal_lines)').run()).changes).toBe(1);
+    // the Supabase REST roles (when present) get no table access, and RLS is on everywhere
+    const rls = (await db.prepare("SELECT COUNT(*) AS n FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'r' AND NOT relrowsecurity").get()) as { n: number };
+    expect(rls.n).toBe(0);
   });
 
-  it('creates backups and blocks path traversal on download', async () => {
-    const b = await req('/api/backups', { method: 'POST', cookie: s.cookie, csrf: s.csrf });
-    expect(b.res.status).toBe(200);
-    expect((await req(`/api/backups/${b.json.name}/download`, { cookie: s.cookie })).res.status).toBe(200);
-    for (const evil of ['..%2F..%2Fdata%2Ftest.db', '..%2Ftest.db', 'finance-20260101-000000-x.db%00.txt']) {
-      expect((await req(`/api/backups/${evil}/download`, { cookie: s.cookie })).res.status).not.toBe(200);
+  it('restores a backup into an empty database and refuses to overwrite a live ledger', { timeout: 30000 }, async () => {
+    const data = parseBackup(Buffer.from(JSON.stringify(await createBackup(db))));
+    await expect(restoreBackup(db, data)).rejects.toThrow(/already has journal entries/);
+    const target = await openTestDb();
+    try {
+      await seedIfEmpty(target.db);
+      await restoreBackup(target.db, data);
+      const [a, b] = [await trialBalance(db, '2030-01-01'), await trialBalance(target.db, '2030-01-01')];
+      expect(b.totalDebit).toBe(a.totalDebit);
+      expect(b.balanced).toBe(true);
+      const count = async (d: DB, t: string) => ((await d.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get()) as { n: number }).n;
+      for (const t of ['accounts', 'journal_entries', 'journal_lines', 'audit_log', 'recurring_transactions']) expect(await count(target.db, t), t).toBe(await count(db, t));
+      // sequences continue after restored ids
+      const id = (await target.db.prepare("INSERT INTO goals (name, target_amount) VALUES ('x', 1)").run()).lastInsertRowid!;
+      expect(id).toBeGreaterThan(0);
+      expect(parseBackup(encryptBuffer(Buffer.from(JSON.stringify(data)), 'k'.repeat(40)), 'k'.repeat(40)).format).toBe('pfhq-backup-v2');
+      expect(() => parseBackup(Buffer.from('{"format":"evil"}'))).toThrow(/Not a Personal Finance HQ backup/);
+    } finally {
+      await target.drop();
     }
-    expect(backupPath({ backupDir: tmpDir } as never, '../test.db')).toBeNull();
   });
 
   it('posts a recurring transaction on demand and still supports pause/resume', async () => {
-    const acct = (code: string) => (db.prepare('SELECT id FROM accounts WHERE code = ?').get(code) as { id: number }).id;
-    const created = await req('/api/recurring', { cookie: s.cookie, csrf: s.csrf, body: { description: 'Rent', frequency: 'monthly', nextDate: '2026-02-01', template: { lines: [{ accountId: acct('5010'), debit: 1500 }, { accountId: acct('1010'), credit: 1500 }] } } });
+    const acct = async (code: string) => (await db.prepare('SELECT id FROM accounts WHERE code = ?').get(code) as { id: number }).id;
+    const created = await req('/api/recurring', { cookie: s.cookie, csrf: s.csrf, body: { description: 'Rent', frequency: 'monthly', nextDate: '2026-02-01', template: { lines: [{ accountId: (await acct('5010')), debit: 1500 }, { accountId: (await acct('1010')), credit: 1500 }] } } });
     expect(created.res.status, created.text).toBe(200);
     const rec = { id: created.json.id as number };
-    const before = (db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get() as { n: number }).n;
+    const before = (await db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get() as { n: number }).n;
     const r = await req(`/api/recurring/${rec!.id}/post-now`, { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-07' } });
     expect(r.res.status, r.text).toBe(200);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get() as { n: number }).n).toBe(before + 1);
-    expect((db.prepare('SELECT next_date FROM recurring_transactions WHERE id = ?').get(rec.id) as { next_date: string }).next_date).toBe('2026-03-01');
+    expect((await db.prepare('SELECT COUNT(*) AS n FROM journal_entries').get() as { n: number }).n).toBe(before + 1);
+    expect((await db.prepare('SELECT next_date FROM recurring_transactions WHERE id = ?').get(rec.id) as { next_date: string }).next_date).toBe('2026-03-01');
     expect((await req(`/api/recurring/${rec!.id}/pause`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(200);
     expect((await req(`/api/recurring/${rec!.id}/resume`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(200);
     expect((await req(`/api/recurring/${rec!.id}/drop`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(400);
