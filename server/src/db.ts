@@ -362,6 +362,7 @@ ${TABLES.map((t) => `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`).join('\n')}
 DO $do$
 DECLARE r TEXT;
 BEGIN
+  REVOKE ALL ON FUNCTION pfhq_block_change() FROM PUBLIC;
   FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
       EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', current_schema(), r);
