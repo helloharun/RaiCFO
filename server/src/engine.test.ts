@@ -6,6 +6,7 @@ import { balanceSheet, cashFlowStatement, equityStatement, incomeStatement, tria
 import { ruleInterpret } from './ai/parser.js';
 import { buildProposal } from './ai/proposal.js';
 import { seedDemo } from './scripts/demoData.js';
+import { completeReconciliation, reconciliationDetail, startReconciliation, toggleCleared } from './engine/services.js';
 import { todayISO } from './money.js';
 
 const TODAY = '2026-10-05';
@@ -131,6 +132,20 @@ describe('investment holdings guard', () => {
     const oversell = propose('Sold 10000 shares of XEQT at $40 from my TFSA into TD');
     expect(() => postEntry(db, oversell.entry)).toThrow(/only 10 held/);
     expect(() => postEntry(db, propose('Sold 4 shares of XEQT for $160 from my TFSA').entry)).not.toThrow();
+  });
+});
+
+describe('reconciliation', () => {
+  it('does not double count the current reconciliation once completed', () => {
+    postEntry(db, propose('Received $2,000 salary into TD on 2026-10-01').entry);
+    const id = startReconciliation(db, code('1010'), TODAY, 2000);
+    for (const r of reconciliationDetail(db, id).rows) toggleCleared(db, id, r.id, true);
+    expect(reconciliationDetail(db, id).difference).toBe(0);
+    completeReconciliation(db, id);
+    const after = reconciliationDetail(db, id);
+    expect(after.previouslyReconciled).toBe(0);
+    expect(after.clearedBalance).toBe(200000);
+    expect(after.difference).toBe(0);
   });
 });
 

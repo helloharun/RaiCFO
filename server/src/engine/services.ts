@@ -96,9 +96,9 @@ export function reconciliationDetail(db: DB, id: number) {
   const prev = db
     .prepare(
       `SELECT COALESCE(SUM(l.debit - l.credit),0) AS b FROM journal_lines l JOIN reconciliations r ON r.id = l.reconciliation_id
-       WHERE l.account_id = ? AND r.status = 'completed'`,
+       WHERE l.account_id = ? AND r.status = 'completed' AND r.id <> ?`,
     )
-    .get(r.account_id) as { b: number };
+    .get(r.account_id, id) as { b: number };
   const previouslyReconciled = sign * prev.b;
   const clearedNow = lines.filter((l) => l.cleared && l.reconciliation_id === id).reduce((s, l) => s + sign * (l.debit - l.credit), 0);
   const clearedBalance = previouslyReconciled + clearedNow;
