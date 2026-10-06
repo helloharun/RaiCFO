@@ -1,14 +1,50 @@
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  constructor(message: string, public status = 0) {
+    super(message);
+  }
+}
+
+let csrfToken: string | null = null;
+export const setCsrfToken = (t: string | null) => (csrfToken = t);
+export const UNAUTHORIZED_EVENT = 'pfhq:unauthorized';
 
 export async function api<T = any>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
+  const method = opts.method ?? (opts.body !== undefined ? 'POST' : 'GET');
+  const headers: Record<string, string> = {};
+  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  if (method !== 'GET' && csrfToken) headers['x-csrf-token'] = csrfToken;
   const res = await fetch(`/api${path}`, {
-    method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
-    headers: opts.body !== undefined ? { 'content-type': 'application/json' } : undefined,
+    method,
+    headers,
+    credentials: 'same-origin',
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
   const data = res.headers.get('content-type')?.includes('json') ? await res.json() : await res.text();
-  if (!res.ok) throw new ApiError((data as { error?: string })?.error ?? `Request failed (${res.status})`);
+  if (res.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  if (!res.ok) throw new ApiError((data as { error?: string })?.error ?? `Request failed (${res.status})`, res.status);
   return data as T;
+}
+
+/** Downloads go through fetch so session expiry is handled; the file is then saved via a blob URL. */
+export async function download(path: string) {
+  const res = await fetch(`/api${path}`, { credentials: 'same-origin' });
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    throw new ApiError('Session expired.', 401);
+  }
+  if (!res.ok) {
+    const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
+    throw new ApiError(data?.error ?? `Download failed (${res.status})`, res.status);
+  }
+  const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? 'download';
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 export const cad = (cents: number | null | undefined, opts: { sign?: boolean; currency?: string } = {}) => {

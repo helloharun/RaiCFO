@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Download, Pencil, Plus, Repeat, RotateCcw, Search } from 'lucide-react';
-import { api, cad, today, type Entry, type EntryInput, typeLabel, TYPE_LABELS } from '../api';
+import { api, cad, download, today, type Entry, type EntryInput, typeLabel, TYPE_LABELS } from '../api';
 import EntryEditor, { blankEntry, entryTotals } from '../components/EntryEditor';
 import { AccountSelect, Empty, ErrorBox, Modal, Money, PageHeader, useAccounts, useApi } from '../components/ui';
 
@@ -44,7 +44,7 @@ export default function Journal() {
         subtitle="Every posted entry. Entries are never deleted — corrections are made by reversal, keeping a full audit trail."
         actions={
           <>
-            <a className="btn-secondary" href="/api/export/journal.csv">
+            <a className="btn-secondary cursor-pointer" role="button" onClick={() => download('/export/journal.csv').catch((e) => alert((e as Error).message))}>
               <Download size={15} /> Export CSV
             </a>
             <button className="btn-primary" onClick={() => setEditing({ entry: blankEntry(today()) })}>

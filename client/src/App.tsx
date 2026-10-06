@@ -1,7 +1,13 @@
+import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Route, Routes } from 'react-router-dom';
 import {
-  BarChart3, BookOpen, Bot, CalendarClock, CheckSquare, FileSpreadsheet, History, LayoutDashboard, Landmark, LineChart, MessageSquarePlus, PiggyBank, Settings as SettingsIcon, Upload,
+  BarChart3, BookOpen, Bot, CalendarClock, CheckSquare, Database, FileSpreadsheet, Flag, History, LayoutDashboard, Landmark, LineChart, LogOut, MessageSquarePlus, PiggyBank, Settings as SettingsIcon, TrendingDown, Upload,
 } from 'lucide-react';
+import { api, setCsrfToken, UNAUTHORIZED_EVENT } from './api';
+import Login, { type SessionInfo } from './pages/Login';
+import Goals from './pages/Goals';
+import Planning from './pages/Planning';
+import DataSecurity from './pages/DataSecurity';
 import Dashboard from './pages/Dashboard';
 import Record from './pages/Record';
 import Journal from './pages/Journal';
@@ -24,16 +30,50 @@ const NAV = [
   ['/accounts', 'Accounts', Landmark],
   ['/reports', 'Statements', FileSpreadsheet],
   ['/budgets', 'Budgets', PiggyBank],
+  ['/goals', 'Goals', Flag],
+  ['/planning', 'Cash Flow & Debt', TrendingDown],
   ['/investments', 'Investments', LineChart],
   ['/reconcile', 'Reconcile', CheckSquare],
   ['/import', 'Import CSV', Upload],
   ['/recurring', 'Recurring', CalendarClock],
   ['/ask', 'Ask Finance', Bot],
   ['/audit', 'Audit Trail', History],
+  ['/data', 'Data & Security', Database],
   ['/settings', 'Settings', SettingsIcon],
 ] as const;
 
 export default function App() {
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const apply = useCallback((s: SessionInfo) => {
+    setCsrfToken(s.authenticated ? s.csrfToken ?? null : null);
+    setSession(s);
+  }, []);
+
+  useEffect(() => {
+    api<SessionInfo>('/auth/session').then(apply, () => apply({ authenticated: false }));
+    const onUnauthorized = () => {
+      setNotice('Your session expired. Please sign in again.');
+      apply({ authenticated: false });
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, [apply]);
+
+  if (!session) return <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">Loading…</div>;
+  if (!session.authenticated) return <Login notice={notice} onLogin={(s) => (setNotice(null), apply(s))} />;
+  return <Shell username={session.username ?? ''} onLogout={async () => {
+    try {
+      await api('/auth/logout', { method: 'POST' });
+    } finally {
+      setNotice(null);
+      apply({ authenticated: false });
+    }
+  }} />;
+}
+
+function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { data: meta } = useApi<{ ai: { enabled: boolean; provider?: string; model?: string } }>('/meta');
   return (
     <div className="flex min-h-screen">
@@ -65,6 +105,12 @@ export default function App() {
         <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
           AI: {meta?.ai.enabled ? <span className="text-emerald-600">{meta.ai.provider} · {meta.ai.model}</span> : <span>built-in parser (no LLM key)</span>}
           <div>Reporting currency: CAD</div>
+          <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
+            <span className="truncate" title={username}>Signed in as <b className="text-slate-700">{username}</b></span>
+            <button className="btn-ghost px-2 py-1 text-xs" onClick={onLogout} title="Sign out">
+              <LogOut size={14} /> Sign out
+            </button>
+          </div>
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
@@ -74,6 +120,7 @@ export default function App() {
               {label}
             </NavLink>
           ))}
+          <button className="whitespace-nowrap rounded px-2 py-1 text-xs text-slate-600" onClick={onLogout}>Sign out</button>
         </header>
         <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 md:px-8">
           <Routes>
@@ -83,6 +130,9 @@ export default function App() {
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/budgets" element={<Budgets />} />
+            <Route path="/goals" element={<Goals />} />
+            <Route path="/planning" element={<Planning />} />
+            <Route path="/data" element={<DataSecurity />} />
             <Route path="/investments" element={<Investments />} />
             <Route path="/reconcile" element={<Reconcile />} />
             <Route path="/import" element={<ImportCsv />} />

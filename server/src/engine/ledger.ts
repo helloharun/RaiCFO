@@ -73,6 +73,14 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
   if (!isValidISODate(input.date)) errors.push('A valid date (YYYY-MM-DD) is required.');
   if (!input.description || !input.description.trim()) errors.push('A description is required.');
   if (!Array.isArray(input.lines) || input.lines.length < 2) errors.push('A journal entry needs at least two lines.');
+  else if (input.lines.length > 200) errors.push('A journal entry can have at most 200 lines.');
+  if (typeof input.description === 'string' && input.description.length > 500) errors.push('Description is too long (max 500 characters).');
+  for (const [k, max] of [['payee', 200], ['memo', 2000], ['rawInput', 4000], ['explanation', 8000]] as const) {
+    const v = input[k];
+    if (v !== undefined && v !== null && (typeof v !== 'string' || v.length > max)) errors.push(`${k} must be text of at most ${max} characters.`);
+  }
+  if (input.currency !== undefined && input.currency !== null && !/^[A-Za-z]{3}$/.test(String(input.currency))) errors.push('Currency must be a 3-letter code.');
+  if (input.fxRate !== undefined && input.fxRate !== null && !(Number.isFinite(Number(input.fxRate)) && Number(input.fxRate) >= 0 && Number(input.fxRate) < 1e6)) errors.push('Invalid exchange rate.');
   if (errors.length) throw new ValidationError(errors.join(' '), errors);
 
   const lockDate = getSetting(db, 'lock_date');
@@ -91,6 +99,10 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
     if (!acct) errors.push(`Line ${i + 1}: account not found.`);
     else if (!acct.is_active) errors.push(`Line ${i + 1}: account "${acct.name}" is inactive.`);
     if (!Number.isFinite(od) || !Number.isFinite(oc) || od < 0 || oc < 0) errors.push(`Line ${i + 1}: amounts must be positive numbers.`);
+    else if (od > 1e13 || oc > 1e13) errors.push(`Line ${i + 1}: amount is unrealistically large.`);
+    if (l.memo !== undefined && l.memo !== null && (typeof l.memo !== 'string' || l.memo.length > 500)) errors.push(`Line ${i + 1}: memo is too long.`);
+    if (l.symbol !== undefined && l.symbol !== null && (typeof l.symbol !== 'string' || !/^[A-Za-z0-9.\-:]{0,15}$/.test(l.symbol.trim()))) errors.push(`Line ${i + 1}: invalid security symbol.`);
+    if (l.quantity !== undefined && l.quantity !== null && !Number.isFinite(Number(l.quantity))) errors.push(`Line ${i + 1}: invalid quantity.`);
     if (od > 0 && oc > 0) errors.push(`Line ${i + 1}: a line cannot have both a debit and a credit.`);
     if (od === 0 && oc === 0) errors.push(`Line ${i + 1}: a line needs a debit or a credit amount.`);
     let secId: number | null = l.securityId ?? null;
@@ -116,7 +128,7 @@ export function validateEntry(db: DB, input: EntryInput, opts: { skipLock?: bool
     );
   }
 
-  if (!opts.reversalOf && input.source !== 'reversal') {
+  if (!opts.reversalOf) {
     const sold = new Map<string, number>();
     for (const l of lines) {
       if (l.securityId && l.quantity && l.quantity < 0) {

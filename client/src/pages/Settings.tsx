@@ -54,7 +54,7 @@ export default function Settings() {
       <div className="card p-5">
         <h2 className="mb-1 font-semibold">AI configuration</h2>
         <p className="text-sm text-slate-600">
-          {meta?.ai.enabled ? `Using ${meta.ai.provider} (${meta.ai.model}).` : 'No LLM configured — the built-in deterministic parser and analyst are used.'} To enable an LLM, set <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code> (optionally <code>LLM_MODEL</code>, <code>LLM_BASE_URL</code>) in <code>server/.env</code> and restart. The AI only proposes interpretations; the accounting engine always builds and validates the entries.
+          {meta?.ai.enabled ? `Using ${meta.ai.provider} (${meta.ai.model}).` : 'No LLM configured — the built-in deterministic parser and analyst are used.'} To enable Groq, set <code>GROQ_API_KEY</code> (optionally <code>GROQ_MODEL</code>) in <code>server/.env</code> and restart. OpenAI/Anthropic are also supported via <code>LLM_PROVIDER</code>. The AI only proposes interpretations; the accounting engine always builds and validates the entries.
         </p>
       </div>
 

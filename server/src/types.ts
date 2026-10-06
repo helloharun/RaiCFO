@@ -14,6 +14,8 @@ export interface Account {
   sort_order: number;
   is_active: number;
   is_system: number;
+  interest_rate?: number | null;
+  min_payment?: number | null;
 }
 
 export interface LineInput {

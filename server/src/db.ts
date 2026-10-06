@@ -144,6 +144,31 @@ CREATE TABLE IF NOT EXISTS fx_rates (
   PRIMARY KEY (currency, date)
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  csrf TEXT NOT NULL,
+  cred_fp TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  ip TEXT,
+  user_agent TEXT
+);
+
+CREATE TABLE IF NOT EXISTS goals (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL DEFAULT 1,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'savings',
+  target_amount INTEGER NOT NULL,
+  target_date TEXT,
+  account_ids TEXT,
+  manual_amount INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  is_archived INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   user_id INTEGER NOT NULL DEFAULT 1,
   key TEXT NOT NULL,
@@ -159,5 +184,24 @@ export function openDb(file?: string): DB {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+function migrate(db: DB) {
+  const cols = new Set((db.prepare('PRAGMA table_info(accounts)').all() as Array<{ name: string }>).map((c) => c.name));
+  if (!cols.has('interest_rate')) db.exec('ALTER TABLE accounts ADD COLUMN interest_rate REAL');
+  if (!cols.has('min_payment')) db.exec('ALTER TABLE accounts ADD COLUMN min_payment INTEGER');
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_lines_no_delete BEFORE DELETE ON journal_lines
+      BEGIN SELECT RAISE(ABORT, 'Posted journal lines cannot be deleted'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_entries_no_delete BEFORE DELETE ON journal_entries
+      BEGIN SELECT RAISE(ABORT, 'Posted journal entries cannot be deleted; reverse them instead'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_lines_amounts_immutable BEFORE UPDATE OF entry_id, account_id, debit, credit, original_debit, original_credit, security_id, quantity ON journal_lines
+      BEGIN SELECT RAISE(ABORT, 'Posted journal amounts are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_audit_no_update BEFORE UPDATE ON audit_log
+      BEGIN SELECT RAISE(ABORT, 'Audit log is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_audit_no_delete BEFORE DELETE ON audit_log
+      BEGIN SELECT RAISE(ABORT, 'Audit log is append-only'); END;
+  `);
 }

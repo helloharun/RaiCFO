@@ -1,6 +1,43 @@
-node_modules
-dist
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Database, backups and exports (contain personal financial data)
+server/data/
+data/
 *.db
 *.db-*
-.env
-data/
+*.sqlite
+*.sqlite-*
+*.db.enc
+backups/
+exports/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Test & coverage
+coverage/
+.vitest-cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.zip
