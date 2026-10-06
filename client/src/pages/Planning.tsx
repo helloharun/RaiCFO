@@ -128,7 +128,17 @@ function DebtView() {
     }
   };
   const names: Record<string, string> = { avalanche: 'Avalanche (highest rate first)', snowball: 'Snowball (smallest balance first)', minimum: 'Minimum payments only' };
-  const chart = plan ? plan.results[0].timeline.map((p, i) => ({ month: p.month, avalanche: p.totalBalance, snowball: plan.results[1].timeline[i]?.totalBalance, minimum: plan.results[2].timeline[i]?.totalBalance })) : [];
+  const balanceAt = (r: PlanResult, m: number) => {
+    let v: number | undefined;
+    for (const p of r.timeline) if (p.month <= m) v = p.totalBalance;
+    const last = r.timeline[r.timeline.length - 1];
+    return last && m > last.month ? (r.payoffNever ? undefined : 0) : v;
+  };
+  const chart = plan
+    ? [...new Set(plan.results.flatMap((r) => r.timeline.map((p) => p.month)))]
+        .sort((x, y) => x - y)
+        .map((m) => ({ month: m, avalanche: balanceAt(plan.results[0], m), snowball: balanceAt(plan.results[1], m), minimum: balanceAt(plan.results[2], m) }))
+    : [];
 
   return (
     <div className="space-y-4">
