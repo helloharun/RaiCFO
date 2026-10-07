@@ -221,9 +221,9 @@ export default function Dashboard() {
           <ul className="space-y-1 text-sm">
             {d.topMerchants.map((m) => (
               <li key={m.payee} className="flex justify-between">
-                <span>
+                <Link to={`/insights?q=${encodeURIComponent(m.payee)}`} className="hover:text-indigo-700 hover:underline">
                   {m.payee} <span className="text-xs text-slate-400">×{m.n}</span>
-                </span>
+                </Link>
                 <Money cents={m.total} />
               </li>
             ))}

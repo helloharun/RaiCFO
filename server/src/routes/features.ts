@@ -1,13 +1,14 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { DB } from '../db.js';
 import type { AppConfig } from '../config.js';
-import { fromCents, isValidISODate, todayISO } from '../money.js';
+import { addMonths, fromCents, isValidISODate, monthStart, todayISO } from '../money.js';
 import { ValidationError } from '../types.js';
 import { USER_ID, audit, getAccount } from '../engine/ledger.js';
 import { generalLedger, trialBalance, balanceSheet, incomeStatement } from '../engine/reports.js';
 import { BACKUP_FORMAT, createBackup, encryptBuffer } from '../features/backup.js';
 import { debtPlan, deleteGoal, financialHealth, forecast, listGoals, upsertGoal } from '../features/planning.js';
 import { integrityCheck } from '../features/integrity.js';
+import { BUILTIN_MERCHANT_GROUPS, type GroupBy, getMerchantGroups, merchantSummary, saveMerchantGroups, spendingTrend, tagSummary } from '../engine/insights.js';
 import { toCsv } from '../security/csv.js';
 
 type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
@@ -41,6 +42,29 @@ export function featureRouter(db: DB, cfg: AppConfig) {
   const r = express.Router();
   const t = () => todayISO();
   const money = (c: number) => fromCents(c).toFixed(2);
+
+  /* ---------- Insights: spending explorer & merchants ---------- */
+  const yearAgo = () => addMonths(monthStart(t()), -11);
+  r.get('/insights/trend', h((req) =>
+    spendingTrend(db, {
+      from: date(req.query.from, yearAgo()),
+      to: date(req.query.to, t()),
+      groupBy: (typeof req.query.groupBy === 'string' ? req.query.groupBy : 'month') as GroupBy,
+      q: typeof req.query.q === 'string' ? req.query.q : undefined,
+      accountId: req.query.accountId ? posId(req.query.accountId) : undefined,
+    }),
+  ));
+  r.get('/insights/merchants', h(async (req) => {
+    const from = date(req.query.from, yearAgo());
+    const to = date(req.query.to, t());
+    return { ...(await merchantSummary(db, from, to, 100)), tags: await tagSummary(db, from, to) };
+  }));
+  r.get('/insights/merchant-groups', h(async () => ({ custom: await getMerchantGroups(db), builtin: BUILTIN_MERCHANT_GROUPS })));
+  r.put('/insights/merchant-groups', h(async (req) => {
+    const custom = await saveMerchantGroups(db, req.body?.groups);
+    await audit(db, 'update', 'merchant_groups', null, { groups: custom.length });
+    return { custom, builtin: BUILTIN_MERCHANT_GROUPS };
+  }));
 
   /* ---------- Ledger downloads ---------- */
   r.get('/export/general-ledger.csv', h(async (req, res) => {

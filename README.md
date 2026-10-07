@@ -56,6 +56,18 @@ All settings and secrets live in `server/.env` (git-ignored); `server/.env.examp
 - **Data & Security page**: download the journal, general ledger, trial balance and chart of accounts (CSV), the full ledger (JSON), and a complete restorable backup (JSON, optionally encrypted); integrity check of the books; active sessions with "sign out other sessions".
 - **Restore**: point `DATABASE_URL` at a new, empty database and run `npm run restore -w server -- <backup.json | backup.json.enc>`. It refuses to overwrite a database that already has journal entries, and verifies the books after restoring. Supabase also keeps its own database backups (depending on your plan).
 
+## Insights, merchants & #tags
+
+- **Insights page** (`/insights`): search a merchant (“Tims”), any memo word, or a `#tag`, and/or pick any account (expense, asset, liability). Group by **day / week / month / year** over any date range (presets: This month, Last month, Last 3 months, YTD, Last 12 months, Last year, All time). Shows total, average per period, average per transaction, a chart, breakdowns by period/merchant/category, and the matching transactions. Asset/liability accounts also show the running balance.
+- **Merchant grouping**: payees are normalised — store numbers, card-processor prefixes (`SQ *`, `TST*`) and nicknames are merged (“TIM HORTONS #1234”, “Tims”, “Timmies” → Tim Hortons). Built-in groups cover common Canadian merchants; add your own under **Insights → Merchant groups**. Nothing in the ledger is rewritten — grouping is applied when reading.
+- **#tags**: put tags in the memo or in the sentence you type (“Lunch with client at Joe's $42 #work #client-acme”) and they become searchable and totalled in Insights and Ask Finance.
+- **Ask Finance** answers merchant/tag questions (“How much am I spending on Tims?”, “What did I spend at Costco last month?”, “Where do I spend the most this year?”). With Groq enabled, the model also receives top merchants, tags and the exact ledger matches for whatever the question mentions.
+- Tip: include the merchant when recording (“Coffee at Tims $3.50”) so every transaction has a payee.
+
+## Using it as an iPhone app
+
+Open the deployed URL in **Safari** → Share → **Add to Home Screen**. It launches full-screen with its own icon, a bottom tab bar (Home, Record, Insights, Ask, More), notch/home-indicator safe areas and no input zoom. Sessions use the same secure cookie as the browser; data is always live from the server (no offline copy of your books is stored on the phone).
+
 ## Security
 - Login with scrypt-hashed password from `.env`; constant-time comparison; generic error messages; per-IP lockout plus global throttling; login and API rate limits.
 - Server-side sessions (random 256-bit tokens, stored hashed) in `HttpOnly`, `SameSite=Strict`, `Secure` (`__Host-` prefix in production) cookies; idle + absolute timeouts; logout revokes server-side.

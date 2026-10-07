@@ -5,6 +5,7 @@ import { balanceSheet, incomeStatement, netWorthStatement } from '../engine/repo
 import { budgetStatus } from '../engine/services.js';
 import { escapeRe } from './proposal.js';
 import { chat, llmConfig } from './llm.js';
+import { merchantMentions, merchantSummary, spendingTrend, tagSummary } from '../engine/insights.js';
 
 export interface Period {
   from: string;
@@ -48,12 +49,64 @@ export function parsePeriod(q: string, today = todayISO()): Period {
   return { from: monthStart(today), to: today, label: 'this month' };
 }
 
+/** True when the question names a period (otherwise parsePeriod falls back to "this month"). */
+export function hasExplicitPeriod(q: string, today = todayISO()): boolean {
+  const p = parsePeriod(q, today);
+  return p.label !== 'this month' || /\bthis month\b/.test(q.toLowerCase());
+}
+
+/** Free-text subject of "spend on X" / "spent at X" questions. */
+export function spendSubject(q: string): string | null {
+  const m = q
+    .toLowerCase()
+    .match(/\b(?:on|at|for|from)\s+([a-z0-9#][a-z0-9'’&.\- ]{1,60}?)(?=\s+(?:this|last|in|during|over|per|each|every|since|so far|a|an|the past|past|daily|weekly|monthly|yearly|on average)\b|\s*[?.!,]|\s*$)/);
+  if (!m) return null;
+  const t = m[1].trim().replace(/^(the|my)\s+/, '');
+  return t.length >= 2 && !/^(average|me|it|that|this|them|stuff|things|everything)$/.test(t) ? t : null;
+}
+
 const money = (c: number) => fromCents(c).toLocaleString('en-CA', { style: 'currency', currency: 'CAD' });
 
 export interface AskAnswer {
   answer: string;
   engine: 'rules' | 'llm';
   data?: unknown;
+}
+
+async function subjectAnswer(db: DB, subject: string, question: string, today: string): Promise<AskAnswer | null> {
+  const isTag = subject.startsWith('#');
+  if (hasExplicitPeriod(question, today)) {
+    const p = parsePeriod(question, today);
+    const days = Math.round((Date.parse(p.to) - Date.parse(p.from)) / 86_400_000) + 1;
+    const tr = await spendingTrend(db, { from: p.from, to: p.to, groupBy: days > 62 ? 'month' : 'week', q: subject });
+    if (!tr.count) return null;
+    const name = tr.merchant ?? (isTag ? subject : `"${subject}"`);
+    const parts = tr.buckets.filter((b) => b.count).map((b) => `${b.label} ${money(b.amount)}`);
+    return {
+      engine: 'rules',
+      answer:
+        `You spent ${money(tr.total)} on ${name} in ${p.label} (${p.from} to ${p.to}) across ${tr.count} purchase${tr.count === 1 ? '' : 's'} — ${money(tr.avgPerTransaction)} on average each.` +
+        (parts.length > 1 ? ` Breakdown: ${parts.join('; ')}.` : '') +
+        (tr.byCategory.length > 1 ? ` Categories: ${tr.byCategory.map((c) => `${c.name} ${money(c.amount)}`).join(', ')}.` : ''),
+      data: tr,
+    };
+  }
+  const from = addMonths(monthStart(today), -11);
+  const tr = await spendingTrend(db, { from, to: today, groupBy: 'month', q: subject });
+  if (!tr.count) return null;
+  const name = tr.merchant ?? (isTag ? subject : `"${subject}"`);
+  const thisMonth = tr.buckets[tr.buckets.length - 1];
+  const weeks = (Date.parse(today) - Date.parse(from)) / (7 * 86_400_000) + 1 / 7;
+  const recent = tr.buckets.slice(-4, -1).map((b) => `${b.label} ${money(b.amount)}`);
+  return {
+    engine: 'rules',
+    answer:
+      `${name}: ${money(thisMonth.amount)} so far this month (${thisMonth.count} purchase${thisMonth.count === 1 ? '' : 's'}). ` +
+      `Over the last 12 months you spent ${money(tr.total)} across ${tr.count} purchases — about ${money(Math.round(tr.total / 12))} a month, ${money(Math.round(tr.total / weeks))} a week, ${money(tr.avgPerTransaction)} per visit.` +
+      (recent.length ? ` Previous months: ${recent.join('; ')}.` : '') +
+      ` Open Insights and search "${tr.merchant ?? subject}" for the daily/weekly/monthly chart.`,
+    data: tr,
+  };
 }
 
 export async function ruleAsk(db: DB, question: string, today = todayISO()): Promise<AskAnswer> {
@@ -90,6 +143,24 @@ export async function ruleAsk(db: DB, question: string, today = todayISO()): Pro
     const rows = bs.liabilities.flatMap((g) => g.rows);
     return { engine: 'rules', answer: `You owe ${money(bs.totalLiabilities)} in total${rows.length ? `: ${rows.map((r) => `${r.name} ${money(r.amount)}`).join(', ')}` : ''}.`, data: rows };
   }
+  if (/top|biggest|largest|most|where/.test(q) && /(merchant|store|shop|place|vendor|where)/.test(q)) {
+    const ms = await merchantSummary(db, p.from, p.to, 10);
+    return {
+      engine: 'rules',
+      answer: ms.merchants.length ? `Top merchants for ${p.label}: ${ms.merchants.map((r, i) => `${i + 1}. ${r.name} ${money(r.amount)} (${r.count}×)`).join('; ')}.` : `No merchant spending recorded for ${p.label}.`,
+      data: ms,
+    };
+  }
+  const spendIntent = /(spen|spent|cost|pay|paid|expense|buy|bought|purchas|visit|how much|how often|times|go to|went)/.test(q) && !/\b(balance|owe|owing|limit|due)\b/.test(q);
+  const mentions = spendIntent ? await merchantMentions(db, question, addMonths(monthStart(today), -23), today) : { merchants: [], tags: [] };
+  for (const subject of [...mentions.tags, ...mentions.merchants]) {
+    const a = await subjectAnswer(db, subject, question, today);
+    if (a) return a;
+  }
+  if (mentions.merchants.length || mentions.tags.length) {
+    const name = mentions.merchants[0] ?? mentions.tags[0];
+    return { engine: 'rules', answer: `I couldn't find any spending on ${name} in ${hasExplicitPeriod(question, today) ? p.label : 'the last 12 months'}. Include the merchant when you record a purchase (e.g. "Coffee at Tims $3.50") or add a #tag to the memo so it can be tracked.` };
+  }
   if (/top|biggest|largest|most/.test(q) && /(expense|spend|categor)/.test(q)) {
     const is = await incomeStatement(db, p.from, p.to);
     const top = is.expenses.slice(0, 5);
@@ -111,6 +182,11 @@ export async function ruleAsk(db: DB, question: string, today = todayISO()): Pro
     const bal = await accountBalances(db, { to: today });
     return { engine: 'rules', answer: namedBal.map((a) => `${a.name}: ${money(bal.get(a.id)?.balance ?? 0)}${a.type === 'liability' ? ' owing' : ''}`).join('; ') + '.' };
   }
+  const subject = /(spen|spent|expense|cost|pay|paid)/.test(q) ? spendSubject(question) : null;
+  if (subject) {
+    const a = await subjectAnswer(db, subject, question, today);
+    if (a) return a;
+  }
   if (/(spen|spent|expense|cost)/.test(q)) {
     const is = await incomeStatement(db, p.from, p.to);
     return { engine: 'rules', answer: `You spent ${money(is.totalExpenses)} in ${p.label}. Largest: ${is.expenses.slice(0, 3).map((r) => `${r.name} ${money(r.amount)}`).join(', ') || 'none'}.`, data: is };
@@ -131,7 +207,7 @@ export async function ruleAsk(db: DB, question: string, today = todayISO()): Pro
   };
 }
 
-async function financialContext(db: DB, today: string): Promise<string> {
+async function financialContext(db: DB, today: string, question = ''): Promise<string> {
   const nw = await netWorthStatement(db, today);
   const months: unknown[] = [];
   for (let i = 5; i >= 0; i--) {
@@ -147,6 +223,28 @@ async function financialContext(db: DB, today: string): Promise<string> {
   }
   const balances = [...nw.assets.flatMap((g) => g.rows), ...nw.liabilities.flatMap((g) => g.rows)].map((r) => ({ account: r.name, balance: fromCents(r.amount) }));
   const b = await budgetStatus(db, today.slice(0, 7));
+  const sixAgo = addMonths(monthStart(today), -5);
+  const ms = await merchantSummary(db, sixAgo, today, 40);
+  const tags = (await tagSummary(db, sixAgo, today)).slice(0, 20);
+  const mentions = question ? await merchantMentions(db, question, addMonths(monthStart(today), -23), today) : { merchants: [], tags: [] };
+  const subjects = [...mentions.tags, ...mentions.merchants];
+  const free = !subjects.length && question ? spendSubject(question) : null;
+  if (free) subjects.push(free);
+  const focus = [];
+  for (const subj of subjects.slice(0, 3)) {
+    const tr = await spendingTrend(db, { from: addMonths(monthStart(today), -11), to: today, groupBy: 'month', q: subj });
+    focus.push({
+      searchedFor: subj,
+      merchant: tr.merchant,
+      matchedTerms: tr.matchedTerms,
+      last12MonthsTotal: fromCents(tr.total),
+      purchases: tr.count,
+      avgPerPurchase: fromCents(tr.avgPerTransaction),
+      monthly: tr.buckets.map((x) => ({ month: x.start.slice(0, 7), amount: fromCents(x.amount), purchases: x.count })),
+      byCategory: tr.byCategory.map((c) => ({ category: c.name, amount: fromCents(c.amount) })),
+      recentTransactions: tr.transactions.slice(0, 15).map((x) => ({ date: x.date, description: x.description, payee: x.payee, memo: x.memo, amount: fromCents(x.amount) })),
+    });
+  }
   return JSON.stringify({
     today,
     currency: 'CAD',
@@ -157,6 +255,10 @@ async function financialContext(db: DB, today: string): Promise<string> {
     balances,
     last6Months: months,
     budgetThisMonth: b.rows.filter((r) => r.budget).map((r) => ({ category: r.name, budget: fromCents(r.budget), actual: fromCents(r.actual) })),
+    topMerchantsLast6Months: ms.merchants.map((r) => ({ merchant: r.name, amount: fromCents(r.amount), purchases: r.count, avgPerPurchase: fromCents(r.avgPerVisit), lastDate: r.lastDate, category: r.categories[0] })),
+    spendingWithoutMerchantLast6Months: fromCents(ms.unattributed),
+    memoTagsLast6Months: tags.map((t) => ({ tag: t.tag, amount: fromCents(t.amount), purchases: t.count })),
+    questionFocus: focus,
   });
 }
 
@@ -164,8 +266,11 @@ export async function ask(db: DB, question: string, today = todayISO()): Promise
   if (!llmConfig()) return ruleAsk(db, question, today);
   try {
     const answer = await chat(
-      'You are a careful personal CFO and financial analyst. Answer ONLY from the ledger-derived data provided (amounts in CAD). If the data is insufficient, say so. Be concise, use specific numbers, and give practical observations. Do not give regulated investment advice.',
-      `Ledger data: ${(await financialContext(db, today))}\n\nQuestion: ${question}`,
+      'You are a careful personal CFO and financial analyst. Answer ONLY from the ledger-derived data provided (amounts in CAD). ' +
+        'Categories (byCategory) are expense accounts; merchants come from the payee/memo of each transaction, with nicknames and store numbers merged (e.g. "Tims" = Tim Hortons). ' +
+        'When questionFocus is present it holds the exact ledger matches for the merchant, #tag or keyword in the question — use it for merchant-level answers (totals, per-month, per-purchase averages, trends). ' +
+        'If the data is insufficient, say so and suggest recording the merchant in the payee or a #tag in the memo. Be concise, use specific numbers, and give practical observations. Do not give regulated investment advice.',
+      `Ledger data: ${await financialContext(db, today, question)}\n\nQuestion: ${question}`,
       false,
     );
     return { answer, engine: 'llm' };

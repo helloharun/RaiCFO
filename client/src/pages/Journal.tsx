@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Download, Pencil, Plus, Repeat, RotateCcw, Search } from 'lucide-react';
 import { api, cad, download, today, type Entry, type EntryInput, typeLabel, TYPE_LABELS } from '../api';
 import EntryEditor, { blankEntry, entryTotals } from '../components/EntryEditor';
-import { AccountSelect, Empty, ErrorBox, Modal, Money, PageHeader, useAccounts, useApi } from '../components/ui';
+import { AccountSelect, DateRange, Empty, ErrorBox, Modal, Money, PageHeader, useAccounts, useApi } from '../components/ui';
 
 export default function Journal() {
   const { accounts } = useAccounts();
@@ -58,8 +58,7 @@ export default function Journal() {
           <Search size={15} className="absolute left-2.5 top-2.5 text-slate-400" />
           <input className="input pl-8" placeholder="Search description, payee…" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })} />
         </div>
-        <input type="date" className="input" value={filters.from} onChange={(e) => setFilters({ ...filters, from: e.target.value })} />
-        <input type="date" className="input" value={filters.to} onChange={(e) => setFilters({ ...filters, to: e.target.value })} />
+        <DateRange className="md:col-span-2" from={filters.from || '2000-01-01'} to={filters.to || today()} onChange={(r) => setFilters({ ...filters, ...r })} />
         <AccountSelect accounts={accounts} value={filters.accountId ? Number(filters.accountId) : null} allowEmpty placeholder="All accounts" onChange={(id) => setFilters({ ...filters, accountId: id ? String(id) : '' })} />
         <select className="input" value={filters.type} onChange={(e) => setFilters({ ...filters, type: e.target.value })}>
           <option value="">All types</option>
@@ -70,7 +69,32 @@ export default function Journal() {
           ))}
         </select>
       </div>
-      <div className="card overflow-x-auto">
+      <div className="card md:hidden">
+        <ul className="divide-y divide-slate-100">
+          {data?.entries.map((e) => (
+            <li key={e.id}>
+              <button className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left active:bg-slate-50" onClick={() => setSelected(e)}>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{e.description}</div>
+                  <div className="truncate text-xs text-slate-500">
+                    {e.date} · #{e.id}{e.payee ? ` · ${e.payee}` : ''}
+                  </div>
+                  <div className="mt-0.5 truncate text-xs text-slate-400">
+                    {e.lines.filter((l) => l.debit).map((l) => l.account_name).join(', ')} ← {e.lines.filter((l) => l.credit).map((l) => l.account_name).join(', ')}
+                  </div>
+                  {(e.reversed_by || e.reversal_of) && (
+                    <span className={`badge mt-1 ${e.reversed_by ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-800'}`}>{e.reversed_by ? 'Reversed' : 'Reversal'}</span>
+                  )}
+                </div>
+                <Money cents={e.lines.reduce((s, l) => s + l.debit, 0)} className="shrink-0 text-sm font-medium" />
+              </button>
+            </li>
+          ))}
+        </ul>
+        {data && !data.entries.length && <Empty>No entries match.</Empty>}
+        {data && <div className="px-4 py-2 text-xs text-slate-500">{data.total} entries</div>}
+      </div>
+      <div className="card hidden overflow-x-auto md:block">
         <table className="table">
           <thead>
             <tr>

@@ -74,7 +74,7 @@ export function Stat({ label, value, sub, tone }: { label: string; value: ReactN
   return (
     <div className="card p-4">
       <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
-      <div className={`mt-1 text-2xl font-semibold tabular-nums ${tone === 'good' ? 'text-emerald-600' : tone === 'bad' ? 'text-rose-600' : ''}`}>{value}</div>
+      <div className={`mt-1 truncate text-xl font-semibold tabular-nums md:text-2xl ${tone === 'good' ? 'text-emerald-600' : tone === 'bad' ? 'text-rose-600' : ''}`}>{value}</div>
       {sub && <div className="mt-1 text-xs text-slate-500">{sub}</div>}
     </div>
   );
@@ -87,8 +87,11 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 pt-16" onMouseDown={onClose}>
-      <div className={`card w-full ${wide ? 'max-w-4xl' : 'max-w-lg'} p-5`} onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/40 md:items-start md:overflow-y-auto md:p-4 md:pt-16" onMouseDown={onClose}>
+      <div
+        className={`card max-h-[92dvh] w-full overflow-y-auto rounded-b-none p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] md:max-h-none md:overflow-visible md:rounded-xl md:pb-5 ${wide ? 'md:max-w-4xl' : 'md:max-w-lg'}`}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold">{title}</h2>
           <button className="btn-ghost" onClick={onClose} aria-label="Close">
@@ -147,9 +150,9 @@ export function AccountSelect({
 
 export function Tabs<T extends string>({ tabs, value, onChange }: { tabs: Array<[T, string]>; value: T; onChange: (v: T) => void }) {
   return (
-    <div className="mb-5 flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
+    <div className="no-scrollbar mb-5 flex gap-1 overflow-x-auto rounded-lg bg-slate-100 p-1 md:flex-wrap">
       {tabs.map(([k, label]) => (
-        <button key={k} onClick={() => onChange(k)} className={`rounded-md px-3 py-1.5 text-sm font-medium ${value === k ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
+        <button key={k} onClick={() => onChange(k)} className={`whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium ${value === k ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
           {label}
         </button>
       ))}
@@ -159,4 +162,52 @@ export function Tabs<T extends string>({ tabs, value, onChange }: { tabs: Array<
 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="px-4 py-10 text-center text-sm text-slate-500">{children}</div>;
+}
+
+const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+export const RANGE_PRESETS = [
+  ['this-month', 'This month'],
+  ['last-month', 'Last month'],
+  ['last-3', 'Last 3 months'],
+  ['ytd', 'Year to date'],
+  ['last-12', 'Last 12 months'],
+  ['last-year', 'Last year'],
+  ['all', 'All time'],
+] as const;
+export type RangePreset = (typeof RANGE_PRESETS)[number][0];
+
+export function presetRange(p: RangePreset, now = new Date()): { from: string; to: string } {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const to = iso(now);
+  switch (p) {
+    case 'this-month': return { from: iso(new Date(y, m, 1)), to };
+    case 'last-month': return { from: iso(new Date(y, m - 1, 1)), to: iso(new Date(y, m, 0)) };
+    case 'last-3': return { from: iso(new Date(y, m - 2, 1)), to };
+    case 'ytd': return { from: `${y}-01-01`, to };
+    case 'last-12': return { from: iso(new Date(y, m - 11, 1)), to };
+    case 'last-year': return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` };
+    case 'all': return { from: '2000-01-01', to };
+  }
+}
+
+/** Date range with one-tap presets plus custom from/to. */
+export function DateRange({ from, to, onChange, className = '' }: { from: string; to: string; onChange: (r: { from: string; to: string }) => void; className?: string }) {
+  const current = RANGE_PRESETS.find(([k]) => {
+    const r = presetRange(k);
+    return r.from === from && r.to === to;
+  })?.[0] ?? 'custom';
+  return (
+    <div className={`grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:items-center ${className}`}>
+      <select className="input col-span-2 sm:w-40" value={current} aria-label="Date range" onChange={(e) => e.target.value !== 'custom' && onChange(presetRange(e.target.value as RangePreset))}>
+        {RANGE_PRESETS.map(([k, label]) => (
+          <option key={k} value={k}>{label}</option>
+        ))}
+        <option value="custom">Custom range</option>
+      </select>
+      <input type="date" className="input sm:w-40" aria-label="From" value={from} max={to} onChange={(e) => e.target.value && onChange({ from: e.target.value, to })} />
+      <input type="date" className="input sm:w-40" aria-label="To" value={to} min={from} onChange={(e) => e.target.value && onChange({ from, to: e.target.value })} />
+    </div>
+  );
 }

@@ -4,6 +4,8 @@ import { api } from '../api';
 import { PageHeader, useApi } from '../components/ui';
 
 const SUGGESTIONS = [
+  'How much am I spending on Tims?',
+  'Where do I spend the most this year?',
   'What is my net worth?',
   'How much did I spend on groceries last month?',
   'What are my top expenses this year?',
@@ -35,7 +37,7 @@ export default function Ask() {
   return (
     <div>
       <PageHeader title="Ask Finance" subtitle={`Your AI financial analyst — answers are computed from the ledger. ${meta?.ai.enabled ? 'Using LLM.' : 'Using built-in analyst (add an LLM key for open-ended questions).'}`} />
-      <div className="card flex h-[65vh] flex-col">
+      <div className="card flex h-[calc(100dvh-15rem)] md:h-[65vh] flex-col">
         <div className="flex-1 space-y-4 overflow-y-auto p-5">
           {!msgs.length && (
             <div className="flex flex-wrap gap-2">
@@ -53,7 +55,7 @@ export default function Ask() {
                   <Bot size={16} />
                 </div>
               )}
-              <div className={`max-w-[75%] whitespace-pre-wrap rounded-xl px-4 py-2.5 text-sm ${m.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-slate-100'}`}>{m.text}</div>
+              <div className={`max-w-[85%] md:max-w-[75%] whitespace-pre-wrap rounded-xl px-4 py-2.5 text-sm ${m.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-slate-100'}`}>{m.text}</div>
               {m.role === 'user' && (
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200">
                   <User size={16} />

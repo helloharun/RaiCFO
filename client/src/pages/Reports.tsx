@@ -1,7 +1,7 @@
 import { Fragment, useState, type ReactNode } from 'react';
 import { CheckCircle2, AlertTriangle, Printer } from 'lucide-react';
 import { cad, pct, today, yearStart } from '../api';
-import { AccountSelect, Money, PageHeader, Tabs, useAccounts, useApi } from '../components/ui';
+import { AccountSelect, DateRange, Money, PageHeader, Tabs, useAccounts, useApi } from '../components/ui';
 
 type Tab = 'bs' | 'is' | 'cf' | 'eq' | 'nw' | 'tb' | 'gl';
 const TABS: Array<[Tab, string]> = [
@@ -26,17 +26,13 @@ export default function Reports() {
           <>
             {pit ? (
               <label className="flex items-center gap-2 text-sm">
-                As of <input type="date" className="input w-40" value={asOf} onChange={(e) => setAsOf(e.target.value)} />
+                As of <input type="date" className="input w-44" value={asOf} onChange={(e) => e.target.value && setAsOf(e.target.value)} />
               </label>
             ) : (
-              <>
-                <input type="date" className="input w-40" value={from} onChange={(e) => setFrom(e.target.value)} />
-                <span className="text-slate-400">→</span>
-                <input type="date" className="input w-40" value={to} onChange={(e) => setTo(e.target.value)} />
-              </>
+              <DateRange from={from} to={to} onChange={(r) => (setFrom(r.from), setTo(r.to))} />
             )}
             {tab === 'gl' && (
-              <div className="w-56">
+              <div className="w-full sm:w-56">
                 <AccountSelect accounts={accounts} value={accountId} allowEmpty placeholder="All accounts" onChange={setAccountId} />
               </div>
             )}
@@ -47,7 +43,7 @@ export default function Reports() {
         }
       />
       <Tabs tabs={TABS} value={tab} onChange={setTab} />
-      <div className="card p-6">
+      <div className="card overflow-x-auto p-4 md:p-6">
         {tab === 'bs' && <BalanceSheet asOf={asOf} />}
         {tab === 'is' && <IncomeStatement from={from} to={to} />}
         {tab === 'cf' && <CashFlow from={from} to={to} />}
