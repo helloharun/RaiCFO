@@ -52,6 +52,7 @@ export function featureRouter(db: DB, cfg: AppConfig) {
       groupBy: (typeof req.query.groupBy === 'string' ? req.query.groupBy : 'month') as GroupBy,
       q: typeof req.query.q === 'string' ? req.query.q : undefined,
       accountId: req.query.accountId ? posId(req.query.accountId) : undefined,
+      merchant: typeof req.query.merchant === 'string' ? req.query.merchant : undefined,
     }),
   ));
   r.get('/insights/merchants', h(async (req) => {

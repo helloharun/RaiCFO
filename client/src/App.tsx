@@ -22,6 +22,7 @@ import Ask from './pages/Ask';
 import Audit from './pages/Audit';
 import Settings from './pages/Settings';
 import Insights from './pages/Insights';
+import { AccountTypeView, AccountView } from './pages/AccountDetail';
 import { useApi } from './components/ui';
 
 const NAV = [
@@ -145,6 +146,8 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
             <Route path="/journal" element={<Journal />} />
             <Route path="/insights" element={<Insights />} />
             <Route path="/accounts" element={<Accounts />} />
+            <Route path="/accounts/type/:type" element={<AccountTypeView />} />
+            <Route path="/accounts/:id" element={<AccountView />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/budgets" element={<Budgets />} />
             <Route path="/goals" element={<Goals />} />

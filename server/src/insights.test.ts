@@ -90,6 +90,26 @@ describe('spending explorer', () => {
     expect(tr.closingBalance).toBe(100000 - 18050);
     expect(tr.buckets.at(-1)!.balance).toBe(tr.closingBalance);
   });
+  it('splits a liability balance by lender', async () => {
+    const loan = await code('2200');
+    const bank = await code('1010');
+    await postEntry(db, { date: '2026-03-01', description: 'Borrowed from John', payee: 'John', lines: [{ accountId: bank, debit: 1000 }, { accountId: loan, credit: 1000 }] });
+    await postEntry(db, { date: '2026-03-05', description: 'Loan from Aunt Mary', payee: 'Aunt Mary', lines: [{ accountId: bank, debit: 900 }, { accountId: loan, credit: 900 }] });
+    await postEntry(db, { date: '2026-04-01', description: 'Repaid John', payee: 'John', lines: [{ accountId: loan, debit: 200 }, { accountId: bank, credit: 200 }] });
+    const tr = await spendingTrend(db, { from: '2026-04-01', to: TODAY, groupBy: 'month', accountId: loan });
+    expect(tr.balanceByMerchant).toEqual([
+      { name: 'Aunt Mary', balance: 90000, count: 1, lastDate: '2026-03-05' },
+      { name: 'John', balance: 80000, count: 2, lastDate: '2026-04-01' },
+    ]);
+    expect(tr.closingBalance).toBe(170000);
+    const john = await spendingTrend(db, { from: '2026-01-01', to: TODAY, groupBy: 'year', accountId: loan, merchant: 'John' });
+    expect(john.transactions.map((t) => t.amount)).toEqual([-20000, 100000]);
+    expect(john.transactions[0].otherAccounts).toEqual([(await getAccountByCode(db, '1010'))!.name]);
+    expect(john.balanceByMerchant).toEqual([{ name: 'John', balance: 80000, count: 2, lastDate: '2026-04-01' }]);
+    const exp = await spendingTrend(db, { from: '2026-01-01', to: TODAY, groupBy: 'month', accountId: await code('5100') });
+    expect(exp.balanceByMerchant).toBeNull();
+  });
+
   it('rejects bad input', async () => {
     await expect(spendingTrend(db, { from: TODAY, to: '2026-01-01', groupBy: 'month' })).rejects.toThrow(/date range/);
     await expect(spendingTrend(db, { from: '2026-01-01', to: TODAY, groupBy: 'hour' as never })).rejects.toThrow(/groupBy/);

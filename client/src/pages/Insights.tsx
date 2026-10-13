@@ -15,6 +15,7 @@ interface Trend {
   buckets: Bucket[];
   byCategory: Array<{ name: string; amount: number }>;
   byMerchant: Array<{ name: string; amount: number; count: number }>;
+  balanceByMerchant: Array<{ name: string; balance: number; count: number; lastDate: string }> | null;
   transactions: Array<{ id: number; date: string; description: string; payee: string | null; merchant: string | null; memo: string | null; accounts: string[]; amount: number }>;
   truncated: boolean;
 }
@@ -146,7 +147,7 @@ export default function Insights() {
               {!tr.activePeriods && <Empty>No matching activity.</Empty>}
             </div>
             <div className="card">
-              <div className="border-b border-slate-100 px-4 py-3 text-sm font-semibold">By merchant</div>
+              <div className="border-b border-slate-100 px-4 py-3 text-sm font-semibold">{tr.mode === 'account' ? 'By payee / merchant (this range)' : 'By merchant'}</div>
               <ul className="max-h-80 divide-y divide-slate-100 overflow-y-auto text-sm">
                 {tr.byMerchant.map((m) => (
                   <li key={m.name}>
@@ -167,6 +168,32 @@ export default function Insights() {
               </ul>
             </div>
           </div>
+
+          {tr.balanceByMerchant && (
+            <div className="card mb-4">
+              <div className="flex items-baseline justify-between border-b border-slate-100 px-4 py-3">
+                <span className="text-sm font-semibold">{tr.account?.type === 'liability' ? 'Still owed, by lender / payee' : 'Balance by payee'}</span>
+                <span className="text-xs text-slate-500">as of {tr.to}</span>
+              </div>
+              <ul className="divide-y divide-slate-100 text-sm">
+                {tr.balanceByMerchant.map((m) => (
+                  <li key={m.name}>
+                    <button className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left hover:bg-slate-50 disabled:cursor-default" disabled={m.name.startsWith('(')} onClick={() => set({ q: m.name })}>
+                      <span className="min-w-0">
+                        <span className={m.name.startsWith('(') ? 'text-slate-400' : 'font-medium'}>{m.name}</span>
+                        <span className="block text-xs text-slate-400">{m.count} transaction{m.count > 1 ? 's' : ''} · last {m.lastDate}</span>
+                      </span>
+                      <Money cents={m.balance} className="shrink-0 font-semibold" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {!tr.balanceByMerchant.length && <Empty>Nothing outstanding.</Empty>}
+              {tr.balanceByMerchant.some((m) => m.name.startsWith('(')) && (
+                <div className="border-t border-slate-100 px-4 py-2 text-xs text-slate-500">Entries with no payee can't be attributed. Edit them in the Journal and fill in Payee / merchant.</div>
+              )}
+            </div>
+          )}
 
           {filtered ? (
             <div className="card">

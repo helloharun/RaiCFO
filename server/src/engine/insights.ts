@@ -222,6 +222,8 @@ function bucketLabel(start: string, g: GroupBy): string {
   return `${m} ${d}, ${y}`;
 }
 
+export const NO_MERCHANT = '(no merchant recorded)';
+
 export interface TrendQuery {
   from: string;
   to: string;
@@ -229,6 +231,8 @@ export interface TrendQuery {
   /** Merchant name, nickname, memo word or #tag. */
   q?: string;
   accountId?: number;
+  /** Exact merchant/payee as shown in the breakdowns (NO_MERCHANT for unattributed lines). */
+  merchant?: string;
 }
 
 export interface TrendBucket { start: string; end: string; label: string; amount: number; debit: number; credit: number; count: number; balance?: number }
@@ -239,6 +243,7 @@ export async function spendingTrend(db: DB, query: TrendQuery) {
   if (!GROUP_BYS.includes(groupBy)) throw new ValidationError('groupBy must be day, week, month or year.');
   const q = (query.q ?? '').trim();
   if (q.length > 100) throw new ValidationError('Search is too long.');
+  if (query.merchant !== undefined && query.merchant.length > 200) throw new ValidationError('Merchant is too long.');
 
   const account = query.accountId ? await getAccount(db, query.accountId) : undefined;
   if (query.accountId && !account) throw new ValidationError('Account not found.');
@@ -258,6 +263,7 @@ export async function spendingTrend(db: DB, query: TrendQuery) {
 
   const rows = await lineRows(db, from, to, account ? { accountId: account.id } : { type: 'expense' });
   const matches = (r: LineRow) => {
+    if (query.merchant !== undefined && (merchantOf(m, r) ?? NO_MERCHANT) !== query.merchant) return false;
     if (!q) return true;
     const raw = `${r.payee ?? ''} ${r.description} ${r.memo ?? ''} ${r.raw_input ?? ''} ${r.line_memo ?? ''}`;
     if (tagRe) return tagRe.test(raw.toLowerCase());
@@ -291,7 +297,7 @@ export async function spendingTrend(db: DB, query: TrendQuery) {
     entryIdsPerBucket[idx.get(b.start)!].add(r.entry_id);
     byCategory.set(r.account_name, (byCategory.get(r.account_name) ?? 0) + amt);
     const merchant = merchantOf(m, r);
-    const mk = merchant ?? '(no merchant recorded)';
+    const mk = merchant ?? NO_MERCHANT;
     const me = byMerchant.get(mk) ?? { amount: 0, entries: new Set<number>() };
     me.amount += amt;
     me.entries.add(r.entry_id);
@@ -310,9 +316,39 @@ export async function spendingTrend(db: DB, query: TrendQuery) {
     for (const b of buckets) b.balance = run += b.amount;
   }
 
+  // Balance-sheet accounts: what is left per payee/lender as of `to` (full history, not just the range).
+  let balanceByMerchant: Array<{ name: string; balance: number; count: number; lastDate: string }> | null = null;
+  if (opening !== undefined && account) {
+    const per = new Map<string, { balance: number; entries: Set<number>; lastDate: string }>();
+    for (const r of await lineRows(db, '0000-01-01', to, { accountId: account.id })) {
+      if (!matches(r)) continue;
+      const k = merchantOf(m, r) ?? NO_MERCHANT;
+      const v = per.get(k) ?? { balance: 0, entries: new Set<number>(), lastDate: r.date };
+      v.balance += signed(r.account_type, r.debit, r.credit);
+      v.entries.add(r.entry_id);
+      v.lastDate = r.date;
+      per.set(k, v);
+    }
+    balanceByMerchant = [...per]
+      .filter(([, v]) => v.balance !== 0)
+      .map(([name, v]) => ({ name, balance: v.balance, count: v.entries.size, lastDate: v.lastDate }))
+      .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
+  }
+
   const total = buckets.reduce((s, b) => s + b.amount, 0);
   const count = txns.size;
   const sorted = [...txns.values()].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
+  const shown = sorted.slice(0, 300);
+  const others = new Map<number, Set<string>>();
+  const attachments = new Map<number, number>();
+  if (shown.length) {
+    const ids = shown.map((t) => t.id);
+    const ph = ids.map(() => '?').join(',');
+    const lines = (await db.prepare(`SELECT l.entry_id, a.name FROM journal_lines l JOIN accounts a ON a.id = l.account_id WHERE l.entry_id IN (${ph}) ORDER BY l.id`).all(...ids)) as Array<{ entry_id: number; name: string }>;
+    for (const l of lines) others.set(l.entry_id, (others.get(l.entry_id) ?? new Set<string>()).add(l.name));
+    const att = (await db.prepare(`SELECT entry_id, COUNT(*) AS n FROM entry_attachments WHERE entry_id IN (${ph}) GROUP BY entry_id`).all(...ids)) as Array<{ entry_id: number; n: number }>;
+    for (const a of att) attachments.set(Number(a.entry_id), Number(a.n));
+  }
   return {
     from,
     to,
@@ -330,9 +366,15 @@ export async function spendingTrend(db: DB, query: TrendQuery) {
     openingBalance: opening ?? null,
     closingBalance: opening === undefined ? null : opening + total,
     buckets,
+    balanceByMerchant,
     byCategory: [...byCategory].map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
     byMerchant: [...byMerchant].map(([name, v]) => ({ name, amount: v.amount, count: v.entries.size })).sort((a, b) => b.amount - a.amount).slice(0, 50),
-    transactions: sorted.slice(0, 300).map((t) => ({ ...t, accounts: [...t.accounts] })),
+    transactions: shown.map((t) => ({
+      ...t,
+      accounts: [...t.accounts],
+      otherAccounts: [...(others.get(t.id) ?? [])].filter((n) => !t.accounts.has(n)),
+      attachments: attachments.get(t.id) ?? 0,
+    })),
     truncated: sorted.length > 300,
   };
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { ArrowDown, ArrowUp, Pencil, Plus } from 'lucide-react';
 import { api, subtypeLabel, type Account } from '../api';
 import { AccountSelect, ErrorBox, Modal, Money, PageHeader, useApi } from '../components/ui';
@@ -58,7 +59,9 @@ export default function Accounts() {
           return (
             <div key={t} className="card">
               <div className="flex items-center justify-between border-b px-4 py-3">
-                <h2 className="font-semibold">{TITLES[t]}</h2>
+                <Link to={`/accounts/type/${t}`} className="font-semibold hover:text-indigo-600 hover:underline">
+                  {TITLES[t]} ›
+                </Link>
                 <Money cents={total} className="font-semibold" />
               </div>
               <table className="table">
@@ -69,7 +72,14 @@ export default function Accounts() {
                       <td>
                         <div className="font-medium">
                           {a.parent_id ? '↳ ' : ''}
-                          {a.name} {!a.is_active && <span className="badge bg-slate-200 text-slate-600">inactive</span>}
+                          <Link
+                            to={`/accounts/${a.id}`}
+                            className="hover:text-indigo-600 hover:underline"
+                            title="Open account details"
+                          >
+                            {a.name}
+                          </Link>{' '}
+                          {!a.is_active && <span className="badge bg-slate-200 text-slate-600">inactive</span>}
                           {a.currency !== 'CAD' && <span className="badge ml-1 bg-sky-50 text-sky-700">{a.currency}</span>}
                         </div>
                         <div className="text-xs text-slate-500">{subtypeLabel(a.subtype)}{a.institution ? ` · ${a.institution}` : ''}</div>

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Download, Paperclip, Pencil, Plus, Repeat, RotateCcw, Search } from 'lucide-react';
 import { AttachmentPanel, PendingFiles, uploadAll } from '../components/Attachments';
 import { api, cad, download, today, type Entry, type EntryInput, typeLabel, TYPE_LABELS } from '../api';
@@ -14,6 +15,16 @@ export default function Journal() {
   const [editing, setEditing] = useState<{ entry: EntryInput; replaceId?: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<File[]>([]);
+  const [params] = useSearchParams();
+  const navigate = useNavigate();
+  const entryParam = params.get('entry');
+  useEffect(() => {
+    if (entryParam) api<Entry>(`/journal/${Number(entryParam)}`).then(setSelected, (e) => alert((e as Error).message));
+  }, [entryParam]);
+  const closeDetail = () => {
+    setSelected(null);
+    if (entryParam) navigate(-1);
+  };
 
   const save = async () => {
     if (!editing) return;
@@ -153,7 +164,7 @@ export default function Journal() {
       {selected && (
         <EntryDetail
           entry={selected}
-          onClose={() => setSelected(null)}
+          onClose={closeDetail}
           onEdit={() => setEditing({ entry: toInput(selected), replaceId: selected.id })}
           onChanged={() => {
             setSelected(null);
