@@ -3,6 +3,7 @@ import { BASE_CURRENCY, fromCents, isValidISODate, toCents } from '../money.js';
 import { type Account, type EntryInput, ValidationError, isDebitNormal } from '../types.js';
 
 export const USER_ID = 1;
+const ATTACH_COUNT = (t: string) => `(SELECT COUNT(*) FROM entry_attachments x WHERE x.entry_id = ${t}.id) AS attachment_count`;
 
 export async function audit(db: DB, action: string, entity: string, entityId: number | null, details?: unknown): Promise<void> {
   await db.prepare('INSERT INTO audit_log (user_id, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?)').run(
@@ -261,7 +262,7 @@ export interface EntryWithLines {
 }
 
 export async function getEntry(db: DB, id: number): Promise<EntryWithLines | undefined> {
-  const e = await db.prepare('SELECT * FROM journal_entries WHERE id = ? AND user_id = ?').get(id, USER_ID) as EntryWithLines | undefined;
+  const e = await db.prepare(`SELECT j.*, ${ATTACH_COUNT('j')} FROM journal_entries j WHERE j.id = ? AND j.user_id = ?`).get(id, USER_ID) as EntryWithLines | undefined;
   if (!e) return undefined;
   e.lines = (await linesFor(db, [id])).get(id) ?? [];
   return e;
@@ -309,7 +310,7 @@ export async function listEntries(db: DB, f: EntryFilter = {}): Promise<{ entrie
   const w = where.join(' AND ');
   const total = (await db.prepare(`SELECT COUNT(*) AS n FROM journal_entries e WHERE ${w}`).get(...params) as { n: number }).n;
   const rows = (await db
-    .prepare(`SELECT e.* FROM journal_entries e WHERE ${w} ORDER BY e.date DESC, e.id DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT e.*, ${ATTACH_COUNT('e')} FROM journal_entries e WHERE ${w} ORDER BY e.date DESC, e.id DESC LIMIT ? OFFSET ?`)
     .all(...params, f.limit ?? 100, f.offset ?? 0)) as EntryWithLines[];
   const lines = await linesFor(db, rows.map((r) => r.id));
   rows.forEach((r) => (r.lines = lines.get(r.id) ?? []));

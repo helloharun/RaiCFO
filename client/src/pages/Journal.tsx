@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Download, Pencil, Plus, Repeat, RotateCcw, Search } from 'lucide-react';
+import { Download, Paperclip, Pencil, Plus, Repeat, RotateCcw, Search } from 'lucide-react';
+import { AttachmentPanel, PendingFiles, uploadAll } from '../components/Attachments';
 import { api, cad, download, today, type Entry, type EntryInput, typeLabel, TYPE_LABELS } from '../api';
 import EntryEditor, { blankEntry, entryTotals } from '../components/EntryEditor';
 import { AccountSelect, DateRange, Empty, ErrorBox, Modal, Money, PageHeader, useAccounts, useApi } from '../components/ui';
@@ -12,12 +13,17 @@ export default function Journal() {
   const [selected, setSelected] = useState<Entry | null>(null);
   const [editing, setEditing] = useState<{ entry: EntryInput; replaceId?: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
 
   const save = async () => {
     if (!editing) return;
     try {
-      if (editing.replaceId) await api(`/journal/${editing.replaceId}/replace`, { body: editing.entry });
-      else await api('/journal', { body: { ...editing.entry, source: 'manual' } });
+      const e = editing.replaceId
+        ? await api<Entry>(`/journal/${editing.replaceId}/replace`, { body: editing.entry })
+        : await api<Entry>('/journal', { body: { ...editing.entry, source: 'manual' } });
+      const failed = await uploadAll(e.id, files);
+      setFiles([]);
+      if (failed.length) alert(`Entry posted, but some attachments failed:\n${failed.join('\n')}`);
       setEditing(null);
       setSelected(null);
       reload();
@@ -75,7 +81,10 @@ export default function Journal() {
             <li key={e.id}>
               <button className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left active:bg-slate-50" onClick={() => setSelected(e)}>
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{e.description}</div>
+                  <div className="truncate text-sm font-medium">
+                    {e.attachment_count ? <Paperclip size={13} className="mr-1 inline text-slate-400" aria-label="Has attachments" /> : null}
+                    {e.description}
+                  </div>
                   <div className="truncate text-xs text-slate-500">
                     {e.date} · #{e.id}{e.payee ? ` · ${e.payee}` : ''}
                   </div>
@@ -113,6 +122,7 @@ export default function Journal() {
                 <td className="whitespace-nowrap">{e.date}</td>
                 <td>
                   <div className="font-medium">
+                    {e.attachment_count ? <Paperclip size={13} className="mr-1 inline text-slate-400" aria-label={`${e.attachment_count} attachments`} /> : null}
                     {e.description} {e.reversed_by && <span className="badge ml-1 bg-rose-100 text-rose-700">Reversed</span>}
                     {e.reversal_of && <span className="badge ml-1 bg-amber-100 text-amber-800">Reversal</span>}
                   </div>
@@ -149,14 +159,16 @@ export default function Journal() {
             setSelected(null);
             reload();
           }}
+          onAttachmentsChanged={reload}
         />
       )}
       {editing && (
         <Modal title={editing.replaceId ? `Edit entry #${editing.replaceId} (reverses and reposts)` : 'Manual journal entry'} onClose={() => setEditing(null)} wide>
           <ErrorBox error={error} onClose={() => setError(null)} />
           <EntryEditor entry={editing.entry} accounts={accounts} onChange={(entry) => setEditing({ ...editing, entry })} />
+          <PendingFiles files={files} onChange={setFiles} note={editing.replaceId ? 'Existing attachments are kept on the corrected entry.' : undefined} />
           <div className="mt-4 flex justify-end gap-2">
-            <button className="btn-secondary" onClick={() => setEditing(null)}>
+            <button className="btn-secondary" onClick={() => (setEditing(null), setFiles([]))}>
               Cancel
             </button>
             <button className="btn-primary" disabled={!entryTotals(editing.entry).balanced || !editing.entry.description} onClick={save}>
@@ -169,7 +181,7 @@ export default function Journal() {
   );
 }
 
-function EntryDetail({ entry, onClose, onEdit, onChanged }: { entry: Entry; onClose: () => void; onEdit: () => void; onChanged: () => void }) {
+function EntryDetail({ entry, onClose, onEdit, onChanged, onAttachmentsChanged }: { entry: Entry; onClose: () => void; onEdit: () => void; onChanged: () => void; onAttachmentsChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [freq, setFreq] = useState('monthly');
   const meta = entry.metadata ? JSON.parse(entry.metadata) : null;
@@ -260,6 +272,7 @@ function EntryDetail({ entry, onClose, onEdit, onChanged }: { entry: Entry; onCl
           </ul>
         </div>
       )}
+      <AttachmentPanel entryId={entry.id} onChange={onAttachmentsChanged} />
       {meta && Object.keys(meta).length > 0 && <div className="mt-2 text-xs text-slate-500">Metadata: {JSON.stringify(meta)}</div>}
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
         <div className="mr-auto flex items-center gap-1">

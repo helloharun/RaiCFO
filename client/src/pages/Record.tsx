@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, HelpCircle, Loader2, Sparkles, Wand2 } from 'lucide-react';
 import { api, type Entry, type Proposal, typeLabel, TYPE_LABELS } from '../api';
 import EntryEditor, { entryTotals } from '../components/EntryEditor';
+import { PendingFiles, uploadAll } from '../components/Attachments';
 import { AccountSelect, ErrorBox, Notice, PageHeader, useAccounts } from '../components/ui';
 
 const EXAMPLES = [
@@ -23,6 +24,7 @@ export default function Record() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [posted, setPosted] = useState<Entry | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
 
   const interpret = async (input = text) => {
     if (!input.trim()) return;
@@ -53,9 +55,12 @@ export default function Record() {
     setError(null);
     try {
       const e = await api<Entry>('/journal', { body: proposal.entry });
-      setPosted(e);
+      const failed = await uploadAll(e.id, files);
+      setPosted({ ...e, attachment_count: files.length - failed.length });
       setProposal(null);
       setText('');
+      setFiles([]);
+      if (failed.length) setError(`Entry posted, but some attachments failed: ${failed.join('; ')}`);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -107,7 +112,7 @@ export default function Record() {
         <ErrorBox error={error} onClose={() => setError(null)} />
         {posted && (
           <Notice tone="success">
-            <CheckCircle2 className="mr-1 inline" size={16} /> Posted entry #{posted.id} — {posted.description} ({posted.lines.length} lines).{' '}
+            <CheckCircle2 className="mr-1 inline" size={16} /> Posted entry #{posted.id} — {posted.description} ({posted.lines.length} lines{posted.attachment_count ? `, ${posted.attachment_count} attachment${posted.attachment_count > 1 ? 's' : ''}` : ''}).{' '}
             <Link className="underline" to="/journal">
               View journal
             </Link>
@@ -203,6 +208,7 @@ export default function Record() {
                 ))}
               </ul>
             </div>
+            <PendingFiles files={files} onChange={setFiles} />
             <div className="mt-4 flex items-center justify-end gap-2">
               <button className="btn-secondary" onClick={() => setProposal(null)}>
                 Discard

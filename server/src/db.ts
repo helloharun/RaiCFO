@@ -313,11 +313,24 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT,
   PRIMARY KEY (user_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS entry_attachments (
+  id ${ID},
+  user_id BIGINT NOT NULL DEFAULT 1,
+  entry_id BIGINT NOT NULL REFERENCES journal_entries(id),
+  filename TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size BIGINT NOT NULL,
+  sha256 TEXT NOT NULL,
+  data BYTEA NOT NULL,
+  created_at ${TS}
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_entry ON entry_attachments(entry_id);
 `;
 
 export const TABLES = [
   'users', 'accounts', 'securities', 'journal_entries', 'journal_lines', 'audit_log', 'budgets', 'reconciliations',
-  'recurring_transactions', 'merchant_rules', 'fx_rates', 'sessions', 'goals', 'settings',
+  'recurring_transactions', 'merchant_rules', 'fx_rates', 'sessions', 'goals', 'settings', 'entry_attachments',
 ] as const;
 
 const PROTECT = `

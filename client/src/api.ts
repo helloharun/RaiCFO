@@ -25,6 +25,25 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
   return data as T;
 }
 
+export interface Attachment {
+  id: number;
+  entry_id: number;
+  filename: string;
+  mime: string;
+  size: number;
+  created_at: string;
+}
+
+export async function uploadAttachment(entryId: number, file: File): Promise<Attachment> {
+  const headers: Record<string, string> = { 'content-type': file.type || 'application/octet-stream', 'x-filename': encodeURIComponent(file.name) };
+  if (csrfToken) headers['x-csrf-token'] = csrfToken;
+  const res = await fetch(`/api/journal/${entryId}/attachments`, { method: 'POST', headers, credentials: 'same-origin', body: file });
+  const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
+  if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  if (!res.ok) throw new ApiError(res.status === 413 ? `${file.name}: file is too large.` : `${file.name}: ${data?.error ?? `upload failed (${res.status})`}`, res.status);
+  return data as Attachment;
+}
+
 /** Downloads go through fetch so session expiry is handled; the file is then saved via a blob URL. */
 export async function download(path: string) {
   const res = await fetch(`/api${path}`, { credentials: 'same-origin' });
@@ -122,6 +141,7 @@ export interface Entry {
   reversal_of: number | null;
   reversed_by: number | null;
   created_at: string;
+  attachment_count?: number;
   lines: Array<{
     id: number;
     account_id: number;

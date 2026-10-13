@@ -88,6 +88,75 @@ describe('configuration', () => {
   });
 });
 
+describe('entry attachments', () => {
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a1b5d8f00000000049454e44ae426082', 'hex');
+  const PDF = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n');
+  const upload = (entryId: number, body: Buffer, s: { cookie: string; csrf?: string }, name = 'receipt.png', type = 'image/png') =>
+    fetch(`${base}/api/journal/${entryId}/attachments`, {
+      method: 'POST',
+      headers: { cookie: s.cookie, 'content-type': type, 'x-filename': encodeURIComponent(name), ...(s.csrf ? { 'x-csrf-token': s.csrf, origin: base } : {}) },
+      body,
+    });
+
+  async function newEntry(s: { cookie: string; csrf: string }) {
+    const accts = (await req('/api/accounts', { cookie: s.cookie })).json as Array<{ id: number; type: string; subtype: string; is_active: number }>;
+    const exp = accts.find((a) => a.type === 'expense' && a.is_active)!;
+    const cash = accts.find((a) => a.type === 'asset' && a.is_active)!;
+    const r = await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, headers: { origin: base }, body: { date: '2026-01-15', description: 'Coffee with receipt', payee: 'Tim Hortons', lines: [{ accountId: exp.id, debit: 4.25 }, { accountId: cash.id, credit: 4.25 }] } });
+    expect(r.res.status).toBe(200);
+    return r.json.id as number;
+  }
+
+  it('stores, lists, serves and deletes receipts with audit and safety checks', async () => {
+    const s = await login();
+    const entryId = await newEntry(s);
+
+    const up = await upload(entryId, PNG, s, '../../etc/Tim "receipt".png');
+    expect(up.status).toBe(200);
+    const meta = await up.json();
+    expect(meta).toMatchObject({ entry_id: entryId, mime: 'image/png', size: PNG.length, filename: 'Tim receipt.png' });
+    expect(meta.data).toBeUndefined();
+    expect((await upload(entryId, PDF, s, 'statement.pdf', 'application/pdf')).status).toBe(200);
+
+    const list = await req(`/api/journal/${entryId}/attachments`, { cookie: s.cookie });
+    expect(list.json.map((a: { mime: string }) => a.mime)).toEqual(['image/png', 'application/pdf']);
+    expect((await req(`/api/journal/${entryId}`, { cookie: s.cookie })).json.attachment_count).toBe(2);
+
+    const file = await fetch(`${base}/api/attachments/${meta.id}`, { headers: { cookie: s.cookie } });
+    expect(file.status).toBe(200);
+    expect(file.headers.get('content-type')).toBe('image/png');
+    expect(file.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(file.headers.get('content-security-policy')).toContain("default-src 'none'");
+    expect(Buffer.from(await file.arrayBuffer()).equals(PNG)).toBe(true);
+
+    // Type comes from the bytes, not the claimed content-type or extension.
+    const html = await upload(entryId, Buffer.from('<html><script>alert(1)</script></html>'), s, 'evil.png');
+    expect(html.status).toBe(400);
+    expect((await upload(entryId, Buffer.alloc(0), s)).status).toBe(400);
+    expect((await upload(entryId, Buffer.alloc(11 * 1024 * 1024, 0xff), s)).status).toBe(413);
+    expect((await upload(999999, PNG, s)).status).toBe(400);
+
+    // Auth + CSRF required.
+    expect((await upload(entryId, PNG, { cookie: s.cookie })).status).toBe(403);
+    expect((await fetch(`${base}/api/attachments/${meta.id}`)).status).toBe(401);
+
+    // Editing (reverse + repost) keeps receipts on the corrected entry.
+    const entry = (await req(`/api/journal/${entryId}`, { cookie: s.cookie })).json;
+    const replaced = await req(`/api/journal/${entryId}/replace`, {
+      cookie: s.cookie, csrf: s.csrf, headers: { origin: base },
+      body: { date: entry.date, description: 'Coffee (edited)', lines: entry.lines.map((l: { account_id: number; debit: number; credit: number }) => ({ accountId: l.account_id, debit: l.debit / 100, credit: l.credit / 100 })) },
+    });
+    expect(replaced.res.status).toBe(200);
+    expect(replaced.json.attachment_count).toBe(2);
+
+    const del = await req(`/api/attachments/${meta.id}`, { method: 'DELETE', cookie: s.cookie, csrf: s.csrf, headers: { origin: base } });
+    expect(del.res.status).toBe(200);
+    expect((await fetch(`${base}/api/attachments/${meta.id}`, { headers: { cookie: s.cookie } })).status).toBe(404);
+    const audits = await db.query("SELECT action FROM audit_log WHERE entity = 'journal_entry' AND entity_id = $1 AND action IN ('attach','detach')", [entryId]);
+    expect(audits.rows.map((r: { action: string }) => r.action).sort()).toEqual(['attach', 'attach', 'detach']);
+  });
+});
+
 describe('authentication', () => {
   it('blocks every API route without a session', async () => {
     for (const p of ['/api/accounts', '/api/journal', '/api/export/journal.csv', '/api/export/ledger.json', '/api/export/backup.json', '/api/export/backup.json.enc', '/api/meta', '/api/backups', '/api/audit']) {
@@ -228,7 +297,7 @@ describe('hardening', () => {
     await expect(db.prepare('UPDATE journal_lines SET account_id = account_id + 1').run()).rejects.toThrow(/immutable/);
     await expect(db.prepare('DELETE FROM audit_log').run()).rejects.toThrow(/append-only/);
     await expect(db.prepare("UPDATE audit_log SET action = 'x'").run()).rejects.toThrow(/append-only/);
-    await expect(db.exec('TRUNCATE journal_lines, journal_entries')).rejects.toThrow(/truncated/);
+    await expect(db.exec('TRUNCATE journal_lines, journal_entries')).rejects.toThrow(/truncated|foreign key/);
     await expect(db.exec('TRUNCATE audit_log')).rejects.toThrow(/append-only/);
     // reconciliation metadata stays editable
     expect((await db.prepare('UPDATE journal_lines SET cleared = cleared WHERE id = (SELECT MIN(id) FROM journal_lines)').run()).changes).toBe(1);
@@ -313,3 +382,4 @@ describe('helpers', () => {
     expect(String(out.description).length).toBe(300);
   });
 });
+

@@ -21,6 +21,7 @@ import { ask } from '../ai/ask.js';
 import { seedDemo } from '../scripts/demoData.js';
 import { getConfig } from '../config.js';
 import { toCsv } from '../security/csv.js';
+import { addAttachment, copyAttachments, deleteAttachment, getAttachment, listAttachments, safeFilename } from '../features/attachments.js';
 
 type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
 const h = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
@@ -254,9 +255,38 @@ export function apiRouter(db: DB) {
     if (!original) throw new ValidationError('Entry not found.');
     const newId = await db.transaction(async () => {
       await reverseEntry(db, original.id, { reason: 'Edited' });
-      return postEntry(db, { ...(req.body as EntryInput), source: original.source === 'reversal' ? 'manual' : original.source, metadata: { ...(req.body?.metadata ?? {}), replaces: original.id } });
+      const posted = await postEntry(db, { ...(req.body as EntryInput), source: original.source === 'reversal' ? 'manual' : original.source, metadata: { ...(req.body?.metadata ?? {}), replaces: original.id } });
+      await copyAttachments(db, original.id, posted);
+      return posted;
     })();
     return getEntry(db, newId);
+  }));
+
+  /* ---------- Attachments (receipts / proof) ---------- */
+  const attachLimit = () => (getConfig()?.ATTACHMENT_MAX_MB ?? 10) * 1024 * 1024;
+  r.get('/journal/:id/attachments', h((req) => listAttachments(db, id(req))));
+  r.post(
+    '/journal/:id/attachments',
+    (req, res, next) => express.raw({ type: () => true, limit: attachLimit() })(req, res, next),
+    h((req) => addAttachment(db, id(req), safeFilename(req.get('x-filename')), Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0), attachLimit())),
+  );
+  r.get('/attachments/:id', h(async (req, res) => {
+    const a = await getAttachment(db, id(req));
+    if (!a) {
+      res.status(404).json({ error: 'Attachment not found.' });
+      return;
+    }
+    const ascii = a.filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
+    res.setHeader('content-type', a.mime);
+    res.setHeader('content-length', String(a.data.length));
+    res.setHeader('content-disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(a.filename)}`);
+    res.setHeader('cache-control', 'private, max-age=3600');
+    res.setHeader('content-security-policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'self'");
+    res.end(a.data);
+  }));
+  r.delete('/attachments/:id', h(async (req) => {
+    await deleteAttachment(db, id(req));
+    return { ok: true };
   }));
 
   r.get('/export/journal.csv', h(async (_req, res) => {

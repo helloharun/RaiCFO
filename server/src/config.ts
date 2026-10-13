@@ -55,6 +55,7 @@ const schema = z
     LOGIN_MAX_ATTEMPTS: int(5, 1, 100),
     LOGIN_LOCKOUT_MINUTES: int(15, 1, 24 * 60),
     API_RATE_LIMIT_PER_MINUTE: int(300, 10, 100000),
+    ATTACHMENT_MAX_MB: int(10, 1, 50),
 
     LLM_PROVIDER: z.enum(['groq', 'openai', 'anthropic', 'none', '']).optional(),
     GROQ_API_KEY: opt,

@@ -56,7 +56,6 @@ export default function Login({ onLogin, notice }: { onLogin: (s: SessionInfo) =
         <button type="submit" className="btn-primary w-full justify-center" disabled={busy || !username || !password}>
           <Lock size={16} /> {busy ? 'Signing in…' : 'Sign in'}
         </button>
-        <p className="mt-4 text-center text-xs text-slate-400">Single-user app. Credentials are configured in server/.env.</p>
       </form>
     </div>
   );
