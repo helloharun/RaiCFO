@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Pencil, Plus } from 'lucide-react';
-import { accountTree, visibleRows } from '../accountTree';
+import { accountTree, visibleRows, type TreeRow } from '../accountTree';
 import { api, cad, subtypeLabel, type Account } from '../api';
 import { AccountSelect, ErrorBox, Modal, Money, PageHeader, useApi } from '../components/ui';
 
@@ -14,6 +14,11 @@ export default function Accounts() {
   const [editing, setEditing] = useState<Partial<Account> | null>(null);
   const [showInactive, setShowInactive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [bySubtype, setBySubtype] = useState(() => localStorage.getItem('pfhq.accountsGroupBy') === 'subtype');
+  const setGrouping = (sub: boolean) => {
+    setBySubtype(sub);
+    localStorage.setItem('pfhq.accountsGroupBy', sub ? 'subtype' : 'parent');
+  };
   const [collapsed, setCollapsed] = useState<Set<number>>(() => {
     try {
       return new Set(JSON.parse(localStorage.getItem('pfhq.collapsedAccounts') ?? '[]') as number[]);
@@ -58,6 +63,13 @@ export default function Accounts() {
         subtitle="Accounts with history can't be deleted — deactivate them instead."
         actions={
           <>
+            <div className="flex rounded-lg border bg-white p-0.5 text-sm" role="group" aria-label="Group accounts">
+              {([['By parent', false], ['By subtype', true]] as const).map(([label, sub]) => (
+                <button key={label} className={`rounded-md px-2.5 py-1 ${bySubtype === sub ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`} onClick={() => setGrouping(sub)} aria-pressed={bySubtype === sub}>
+                  {label}
+                </button>
+              ))}
+            </div>
             <label className="flex items-center gap-1.5 text-sm text-slate-600">
               <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} /> Show inactive
             </label>
@@ -72,7 +84,14 @@ export default function Accounts() {
         {TYPES.map((t) => {
           const list = (accounts ?? []).filter((a) => a.type === t && (showInactive || a.is_active));
           const total = list.reduce((s, a) => s + a.balance, 0);
-          const rows = visibleRows(accountTree(list), collapsed);
+          const groups: Array<{ subtype: string | null; total: number; rows: TreeRow[] }> = bySubtype
+            ? [...new Set([...(meta?.subtypes[t] ?? []), ...list.map((a) => a.subtype)])]
+                .map((st) => {
+                  const own = list.filter((a) => a.subtype === st).sort((x, y) => x.sort_order - y.sort_order || x.code.localeCompare(y.code));
+                  return { subtype: st, total: own.reduce((s, a) => s + a.balance, 0), rows: own.map((a) => ({ account: a, depth: 0, total: a.balance, hasChildren: false })) };
+                })
+                .filter((g) => g.rows.length)
+            : [{ subtype: null, total, rows: visibleRows(accountTree(list), collapsed) }];
           return (
             <div key={t} className="card">
               <div className="flex items-center justify-between border-b px-4 py-3">
@@ -83,7 +102,20 @@ export default function Accounts() {
               </div>
               <table className="table">
                 <tbody>
-                  {rows.map(({ account: a, depth, total: sum, hasChildren }) => (
+                  {groups.map((g) => (
+                    <Fragment key={g.subtype ?? 'tree'}>
+                      {g.subtype !== null && (
+                        <tr className="bg-slate-50">
+                          <td colSpan={2} className="py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            {subtypeLabel(g.subtype)} <span className="font-normal normal-case">· {g.rows.length}</span>
+                          </td>
+                          <td className="num py-1.5 text-xs font-semibold text-slate-600">
+                            <Money cents={g.total} />
+                          </td>
+                          <td />
+                        </tr>
+                      )}
+                  {g.rows.map(({ account: a, depth, total: sum, hasChildren }) => (
                     <tr key={a.id} className={a.is_active ? '' : 'opacity-50'}>
                       <td className="w-16 text-slate-400">{a.code}</td>
                       <td style={{ paddingLeft: `${0.75 + depth * 1.25}rem` }}>
@@ -105,19 +137,23 @@ export default function Accounts() {
                           {!a.is_active && <span className="badge bg-slate-200 text-slate-600">inactive</span>}
                           {a.currency !== 'CAD' && <span className="badge ml-1 bg-sky-50 text-sky-700">{a.currency}</span>}
                         </div>
-                        <div className="text-xs text-slate-500">{subtypeLabel(a.subtype)}{a.institution ? ` · ${a.institution}` : ''}</div>
+                        <div className="text-xs text-slate-500">{[bySubtype ? a.parent_id && `in ${(accounts ?? []).find((x) => x.id === a.parent_id)?.name ?? ''}` : subtypeLabel(a.subtype), a.institution].filter(Boolean).join(' · ')}</div>
                       </td>
                       <td className="num">
                         <Money cents={sum} className={hasChildren ? 'font-semibold' : ''} />
                         {hasChildren && <div className="text-[11px] font-normal text-slate-400">{a.balance ? `own ${cad(a.balance)} + subs` : 'incl. sub-accounts'}</div>}
                       </td>
                       <td className="w-36 whitespace-nowrap text-right">
-                        <button className="btn-ghost px-1" onClick={() => move(a, -1)} aria-label="Move up">
-                          <ArrowUp size={14} />
-                        </button>
-                        <button className="btn-ghost px-1" onClick={() => move(a, 1)} aria-label="Move down">
-                          <ArrowDown size={14} />
-                        </button>
+                        {!bySubtype && (
+                          <>
+                            <button className="btn-ghost px-1" onClick={() => move(a, -1)} aria-label="Move up">
+                              <ArrowUp size={14} />
+                            </button>
+                            <button className="btn-ghost px-1" onClick={() => move(a, 1)} aria-label="Move down">
+                              <ArrowDown size={14} />
+                            </button>
+                          </>
+                        )}
                         <button className="btn-ghost px-1" onClick={() => setEditing(a)} aria-label="Edit">
                           <Pencil size={14} />
                         </button>
@@ -133,6 +169,8 @@ export default function Accounts() {
                           ))}
                       </td>
                     </tr>
+                  ))}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
