@@ -372,6 +372,65 @@ describe('hardening', () => {
     expect(row).toMatchObject({ balance: 19245, cash: 19245, total: 19245 });
     expect(inv.json.totalCash).toBeGreaterThanOrEqual(19245);
   });
+
+  it('tracks registered-plan contribution room from the ledger', async () => {
+    const seeded = await req('/api/contribution-plans?year=2030', { cookie: s.cookie });
+    expect(seeded.res.status, seeded.text).toBe(200);
+    expect(seeded.json.plans.map((p: { name: string }) => p.name)).toEqual(expect.arrayContaining(['TFSA', 'RRSP', 'FHSA']));
+    const code = async (c: string) => (await db.prepare('SELECT id FROM accounts WHERE code = ?').get(c) as { id: number }).id;
+    const bank = await code('1010');
+    const obe = await code('3000');
+    const salary = await code('4000');
+    const interest = (await db.prepare("SELECT id FROM accounts WHERE subtype = 'interest' AND type = 'income'").get() as { id: number }).id;
+    const mk = async (name: string, subtype: string) => (await req('/api/accounts', { cookie: s.cookie, csrf: s.csrf, body: { name, type: 'asset', subtype, currency: 'CAD' } })).json.id as number;
+    const a = await mk('Room TFSA A', 'tfsa');
+    const b = await mk('Room TFSA B', 'tfsa');
+    const rr = await mk('Room RRSP', 'rrsp');
+    const fh = await mk('Room FHSA', 'other_investment');
+    const post = async (date: string, dr: number, cr: number, amt: number) => {
+      const r = await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, body: { date, description: 'room test', lines: [{ accountId: dr, debit: amt }, { accountId: cr, credit: amt }] } });
+      expect(r.res.status, r.text).toBe(200);
+      return r.json.id as number;
+    };
+    await post('2030-01-01', a, obe, 2000); // opening balance: not a contribution
+    await post('2030-02-01', a, bank, 3000); // contribution
+    await post('2030-03-01', b, a, 500); // between the plan's own accounts: ignored
+    await post('2030-04-01', a, interest, 50); // growth: ignored
+    await post('2030-05-01', bank, a, 1000); // withdrawal
+    const mistake = await post('2030-06-01', a, bank, 400);
+    expect((await req(`/api/journal/${mistake}/reverse`, { cookie: s.cookie, csrf: s.csrf, body: {} })).res.status).toBe(200);
+    await post('2030-06-30', bank, salary, 100000);
+    await post('2030-07-01', fh, bank, 3000);
+    await post('2031-02-15', rr, bank, 1000);
+
+    const mkPlan = async (body: Record<string, unknown>) => {
+      const r = await req('/api/contribution-plans', { cookie: s.cookie, csrf: s.csrf, body });
+      expect(r.res.status, r.text).toBe(200);
+      return r.json.id as number;
+    };
+    const tfsa = await mkPlan({ name: 'My TFSA', rule: 'restore_next_year', accountIds: [a, b], annualLimit: 7000, room: { 2030: 10000 } });
+    const rrsp = await mkPlan({ name: 'My RRSP', rule: 'no_restore', accountIds: [rr], annualLimit: 30000, incomePct: 18, room: { 2030: 5000 } });
+    const fhsa = await mkPlan({ name: 'My FHSA', rule: 'lifetime_cap', accountIds: [fh], annualLimit: 8000, lifetimeCap: 40000, carryCap: 8000, room: { 2030: 8000 } });
+    const get = async (year: number, pid: number) => (await req(`/api/contribution-plans?year=${year}`, { cookie: s.cookie })).json.plans.find((p: { id: number }) => p.id === pid).result;
+
+    expect(await get(2030, tfsa)).toMatchObject({ roomJan1: 1000000, contributed: 300000, withdrawn: 100000, remaining: 700000, estimated: false });
+    expect(await get(2031, tfsa)).toMatchObject({ roomJan1: 1500000, contributed: 0, estimated: true, anchorYear: 2030 });
+    expect(await get(2031, rrsp)).toMatchObject({ roomJan1: 2300000, contributed: 100000, remaining: 2200000, first60: 100000, newRoom: 1800000 });
+    expect(await get(2030, fhsa)).toMatchObject({ roomJan1: 800000, contributed: 300000, remaining: 500000, lifetimeLeft: 3700000 });
+    expect(await get(2031, fhsa)).toMatchObject({ roomJan1: 1300000 });
+    expect(await get(2029, tfsa)).toMatchObject({ roomJan1: null, remaining: null });
+
+    const upd = await req(`/api/contribution-plans/${tfsa}`, { method: 'PUT', cookie: s.cookie, csrf: s.csrf, body: { name: 'TFSA (renamed)', rule: 'restore_next_year', accountIds: [a, b], annualLimit: 7000, room: { 2030: 10000, 2031: 12000 } } });
+    expect(upd.res.status, upd.text).toBe(200);
+    expect(await get(2031, tfsa)).toMatchObject({ roomJan1: 1200000, estimated: false });
+
+    expect((await req('/api/contribution-plans', { cookie: s.cookie, csrf: s.csrf, body: { name: 'x', rule: 'magic' } })).res.status).toBe(400);
+    expect((await req('/api/contribution-plans', { cookie: s.cookie, csrf: s.csrf, body: { name: 'x', rule: 'no_restore', accountIds: [salary] } })).res.status).toBe(400);
+    expect((await req('/api/contribution-plans', { cookie: s.cookie, csrf: s.csrf, body: { name: 'x', rule: 'no_restore', room: { abc: 1 } } })).res.status).toBe(400);
+    expect((await req('/api/contribution-plans', { body: { name: 'x', rule: 'no_restore' }, cookie: s.cookie })).res.status).toBe(403);
+    expect((await req(`/api/contribution-plans/${fhsa}`, { method: 'DELETE', cookie: s.cookie, csrf: s.csrf })).res.status).toBe(200);
+    expect((await req('/api/contribution-plans?year=2030', { cookie: s.cookie })).json.plans.some((p: { id: number }) => p.id === fhsa)).toBe(false);
+  });
 });
 
 describe('helpers', () => {

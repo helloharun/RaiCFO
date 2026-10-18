@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, cad, subtypeLabel, today } from '../api';
 import { Empty, ErrorBox, Money, PageHeader, Stat, useApi } from '../components/ui';
+import ContributionRoom from '../components/ContributionRoom';
 
 interface Holding { accountId: number; accountName: string; securityId: number; symbol: string; name: string | null; currency: string; quantity: number; cost: number; avgCost: number; lastPrice: number | null; priceDate: string | null; marketValue: number | null; unrealizedGain: number | null }
 
@@ -28,6 +29,7 @@ export default function Investments() {
             <Stat label="Realized gains (YTD)" value={cad(data.realizedGainYtd)} />
             <Stat label="Dividends & interest (YTD)" value={cad(data.investmentIncomeYtd)} />
           </div>
+          <ContributionRoom />
           <div className="card mb-4 overflow-x-auto">
             <div className="border-b px-4 py-3 text-sm font-semibold">Investment accounts</div>
             <table className="table">

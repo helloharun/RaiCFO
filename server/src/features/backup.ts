@@ -8,7 +8,7 @@ export const BACKUP_FORMAT = 'pfhq-backup-v2';
 /** Restore order respects foreign keys; sessions are never exported. */
 export const BACKUP_TABLES = [
   'users', 'accounts', 'securities', 'journal_entries', 'journal_lines', 'reconciliations', 'budgets',
-  'recurring_transactions', 'merchant_rules', 'fx_rates', 'goals', 'settings', 'audit_log',
+  'recurring_transactions', 'merchant_rules', 'fx_rates', 'goals', 'contribution_plans', 'settings', 'audit_log',
 ] as const;
 
 function keyFor(secret: string, salt: Buffer) {

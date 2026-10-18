@@ -8,6 +8,7 @@ import { generalLedger, trialBalance, balanceSheet, incomeStatement } from '../e
 import { BACKUP_FORMAT, createBackup, encryptBuffer } from '../features/backup.js';
 import { debtPlan, deleteGoal, financialHealth, forecast, listGoals, upsertGoal } from '../features/planning.js';
 import { integrityCheck } from '../features/integrity.js';
+import { deletePlan, listPlans, upsertPlan } from '../features/contributions.js';
 import { BUILTIN_MERCHANT_GROUPS, type GroupBy, getMerchantGroups, merchantSummary, saveMerchantGroups, spendingTrend, tagSummary } from '../engine/insights.js';
 import { toCsv } from '../security/csv.js';
 
@@ -150,6 +151,15 @@ export function featureRouter(db: DB, cfg: AppConfig) {
   r.post('/goals', h(async (req) => ({ id: (await upsertGoal(db, req.body ?? {})) })));
   r.put('/goals/:id', h(async (req) => ({ id: (await upsertGoal(db, req.body ?? {}, posId(req.params.id))) })));
   r.delete('/goals/:id', h(async (req) => ((await deleteGoal(db, posId(req.params.id))), { ok: true })));
+  const year = (v: unknown) => {
+    const y = v === undefined || v === '' ? Number(t().slice(0, 4)) : Number(v);
+    if (!Number.isInteger(y) || y < 1990 || y > 2100) throw new ValidationError('Invalid year.');
+    return y;
+  };
+  r.get('/contribution-plans', h((req) => listPlans(db, year(req.query.year))));
+  r.post('/contribution-plans', h(async (req) => ({ id: await upsertPlan(db, req.body ?? {}) })));
+  r.put('/contribution-plans/:id', h(async (req) => ({ id: await upsertPlan(db, req.body ?? {}, posId(req.params.id)) })));
+  r.delete('/contribution-plans/:id', h(async (req) => ((await deletePlan(db, posId(req.params.id))), { ok: true })));
   r.get('/planning/health', h(() => financialHealth(db)));
   r.get('/planning/forecast', h((req) => forecast(db, req.query.days ? Number(req.query.days) : 60)));
   r.post('/planning/debt', h((req) => debtPlan(db, req.body ?? {})));

@@ -326,11 +326,30 @@ CREATE TABLE IF NOT EXISTS entry_attachments (
   created_at ${TS}
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_entry ON entry_attachments(entry_id);
+
+CREATE TABLE IF NOT EXISTS contribution_plans (
+  id ${ID},
+  user_id BIGINT NOT NULL DEFAULT 1,
+  name TEXT NOT NULL,
+  rule TEXT NOT NULL,
+  account_ids TEXT,
+  annual_limit BIGINT NOT NULL DEFAULT 0,
+  year_limits TEXT,
+  room TEXT,
+  lifetime_cap BIGINT,
+  carry_cap BIGINT,
+  lifetime_prior BIGINT NOT NULL DEFAULT 0,
+  income_pct DOUBLE PRECISION,
+  notes TEXT,
+  sort_order BIGINT NOT NULL DEFAULT 0,
+  created_at ${TS}
+);
 `;
 
 export const TABLES = [
   'users', 'accounts', 'securities', 'journal_entries', 'journal_lines', 'audit_log', 'budgets', 'reconciliations',
   'recurring_transactions', 'merchant_rules', 'fx_rates', 'sessions', 'goals', 'settings', 'entry_attachments',
+  'contribution_plans',
 ] as const;
 
 const PROTECT = `
