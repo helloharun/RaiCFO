@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ChevronRight, List, Paperclip } from 'lucide-react';
 import { cad, subtypeLabel, type Account } from '../api';
+import { accountTree } from '../accountTree';
 import { DateRange, Empty, ErrorBox, Money, PageHeader, Stat, presetRange, useAccounts, useApi } from '../components/ui';
 
 const TITLES: Record<Account['type'], string> = { asset: 'Assets', liability: 'Liabilities', equity: 'Equity', income: 'Income', expense: 'Expenses' };
@@ -31,10 +32,10 @@ function Crumbs({ items }: { items: Array<[string, string | null]> }) {
   );
 }
 
-function Row({ to, title, sub, cents, muted = false }: { to: string; title: string; sub?: string; cents: number; muted?: boolean }) {
+function Row({ to, title, sub, cents, muted = false, indent = 0 }: { to: string; title: string; sub?: string; cents: number; muted?: boolean; indent?: number }) {
   return (
     <li>
-      <Link to={to} className="flex min-h-[3.25rem] items-center justify-between gap-3 px-4 py-2.5 hover:bg-slate-50 active:bg-slate-100">
+      <Link to={to} style={indent ? { paddingLeft: `${1 + indent * 1.25}rem` } : undefined} className="flex min-h-[3.25rem] items-center justify-between gap-3 px-4 py-2.5 hover:bg-slate-50 active:bg-slate-100">
         <span className="min-w-0">
           <span className={`block truncate ${muted ? 'text-slate-400' : 'font-medium'}`}>{title}</span>
           {sub && <span className="block truncate text-xs text-slate-500">{sub}</span>}
@@ -48,7 +49,6 @@ function Row({ to, title, sub, cents, muted = false }: { to: string; title: stri
   );
 }
 
-const sortAccounts = (list: Account[]) => list.sort((x, y) => x.sort_order - y.sort_order || x.code.localeCompare(y.code));
 
 /** Level 1: every account of one type with its current balance. */
 export function AccountTypeView() {
@@ -56,16 +56,17 @@ export function AccountTypeView() {
   const { accounts } = useAccounts();
   const t = type as Account['type'];
   if (!TITLES[t]) return <Empty>Unknown account type.</Empty>;
-  const list = sortAccounts(accounts.filter((a) => a.type === t && (a.is_active || a.balance !== 0)));
+  const list = accounts.filter((a) => a.type === t && (a.is_active || a.balance !== 0));
   const total = list.reduce((s, a) => s + a.balance, 0);
+  const rows = accountTree(list);
   return (
     <div>
       <Crumbs items={[['Accounts', '/accounts'], [TITLES[t], null]]} />
       <PageHeader title={TITLES[t]} subtitle={`Total ${cad(total)} · tap an account to see where the money went.`} />
       <div className="card">
         <ul className="divide-y divide-slate-100 text-sm">
-          {list.map((a) => (
-            <Row key={a.id} to={`/accounts/${a.id}`} title={`${a.parent_id ? '↳ ' : ''}${a.name}`} sub={`${a.code} · ${subtypeLabel(a.subtype)}${a.institution ? ` · ${a.institution}` : ''}`} cents={a.balance} muted={!a.is_active} />
+          {rows.map(({ account: a, depth, total: sum, hasChildren }) => (
+            <Row key={a.id} to={`/accounts/${a.id}`} indent={depth} title={`${depth ? '↳ ' : ''}${a.name}`} sub={`${a.code} · ${subtypeLabel(a.subtype)}${hasChildren ? ' · incl. sub-accounts' : ''}${a.institution ? ` · ${a.institution}` : ''}`} cents={sum} muted={!a.is_active} />
           ))}
         </ul>
         {!list.length && <Empty>No accounts of this type.</Empty>}
@@ -96,7 +97,9 @@ export function AccountView() {
   if (!account) return accounts.length ? <Empty>Account not found.</Empty> : null;
   const isBal = BALANCE_TYPES.includes(account.type);
   const isAllTime = from === all.from && to === all.to;
-  const children = sortAccounts(accounts.filter((a) => a.parent_id === account.id));
+  const tree = accountTree(accounts.filter((a) => a.type === account.type));
+  const children = tree.filter((r) => r.account.parent_id === account.id);
+  const rolled = tree.find((r) => r.account.id === account.id)?.total ?? account.balance;
   const groups = (isBal ? tr?.balanceByMerchant?.map((m) => ({ name: m.name, amount: m.balance, count: m.count, last: m.lastDate as string | undefined })) : tr?.byMerchant.map((m) => ({ ...m, last: undefined as string | undefined }))) ?? [];
   const label = (n: string) => (n === NO_MERCHANT ? 'No payee / merchant recorded' : n);
   const groupHeading = account.type === 'liability' ? 'Owed to (by lender / payee)' : account.type === 'expense' ? 'Where you spent (by merchant)' : account.type === 'income' ? 'Received from' : 'By payee';
@@ -126,7 +129,8 @@ export function AccountView() {
       />
       <ErrorBox error={error} />
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {merchant === null && <Stat label="Current balance" value={cad(account.balance)} />}
+        {merchant === null && children.length > 0 && <Stat label="Total incl. sub-accounts" value={cad(rolled)} sub={`This account alone ${cad(account.balance)}`} />}
+        {merchant === null && children.length === 0 && <Stat label="Current balance" value={cad(account.balance)} />}
         {outstanding !== null && <Stat label={account.type === 'liability' ? `Still owed (as of ${to})` : `Balance (as of ${to})`} value={cad(outstanding)} />}
         {tr && <Stat label={isAllTime ? (isBal ? 'Net change, all time' : 'Total, all time') : isBal ? 'Net change in range' : 'Total in range'} value={cad(tr.total)} />}
         {tr && <Stat label="Transactions" value={String(tr.count)} />}
@@ -137,7 +141,7 @@ export function AccountView() {
         <div className="card mb-4">
           <div className="border-b border-slate-100 px-4 py-3 text-sm font-semibold">Sub-accounts</div>
           <ul className="divide-y divide-slate-100 text-sm">
-            {children.map((c) => <Row key={c.id} to={`/accounts/${c.id}`} title={c.name} sub={c.code} cents={c.balance} muted={!c.is_active} />)}
+            {children.map(({ account: c, total: sum, hasChildren }) => <Row key={c.id} to={`/accounts/${c.id}`} title={c.name} sub={`${c.code}${hasChildren ? ' · incl. sub-accounts' : ''}`} cents={sum} muted={!c.is_active} />)}
           </ul>
         </div>
       )}

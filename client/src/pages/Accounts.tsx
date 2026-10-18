@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowDown, ArrowUp, Pencil, Plus } from 'lucide-react';
-import { api, subtypeLabel, type Account } from '../api';
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Pencil, Plus } from 'lucide-react';
+import { accountTree, visibleRows } from '../accountTree';
+import { api, cad, subtypeLabel, type Account } from '../api';
 import { AccountSelect, ErrorBox, Modal, Money, PageHeader, useApi } from '../components/ui';
 
 const TYPES: Account['type'][] = ['asset', 'liability', 'equity', 'income', 'expense'];
@@ -13,6 +14,20 @@ export default function Accounts() {
   const [editing, setEditing] = useState<Partial<Account> | null>(null);
   const [showInactive, setShowInactive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<number>>(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem('pfhq.collapsedAccounts') ?? '[]') as number[]);
+    } catch {
+      return new Set();
+    }
+  });
+  const toggle = (id: number) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      localStorage.setItem('pfhq.collapsedAccounts', JSON.stringify([...next]));
+      return next;
+    });
 
   const act = async (fn: () => Promise<unknown>) => {
     try {
@@ -26,9 +41,12 @@ export default function Accounts() {
 
   const move = (a: Account, dir: -1 | 1) => {
     const group = (accounts ?? []).filter((x) => x.type === a.type).sort((x, y) => x.sort_order - y.sort_order || x.code.localeCompare(y.code));
-    const i = group.findIndex((x) => x.id === a.id);
-    const j = i + dir;
-    if (j < 0 || j >= group.length) return;
+    const siblings = group.filter((x) => x.parent_id === a.parent_id);
+    const k = siblings.findIndex((x) => x.id === a.id);
+    const other = siblings[k + dir];
+    if (!other) return;
+    const i = group.indexOf(a);
+    const j = group.indexOf(other);
     [group[i], group[j]] = [group[j], group[i]];
     act(() => api('/accounts/reorder', { body: { ids: group.map((x) => x.id) } }));
   };
@@ -52,10 +70,9 @@ export default function Accounts() {
       <ErrorBox error={error} onClose={() => setError(null)} />
       <div className="grid gap-4 xl:grid-cols-2">
         {TYPES.map((t) => {
-          const list = (accounts ?? [])
-            .filter((a) => a.type === t && (showInactive || a.is_active))
-            .sort((x, y) => x.sort_order - y.sort_order || x.code.localeCompare(y.code));
+          const list = (accounts ?? []).filter((a) => a.type === t && (showInactive || a.is_active));
           const total = list.reduce((s, a) => s + a.balance, 0);
+          const rows = visibleRows(accountTree(list), collapsed);
           return (
             <div key={t} className="card">
               <div className="flex items-center justify-between border-b px-4 py-3">
@@ -66,12 +83,18 @@ export default function Accounts() {
               </div>
               <table className="table">
                 <tbody>
-                  {list.map((a) => (
+                  {rows.map(({ account: a, depth, total: sum, hasChildren }) => (
                     <tr key={a.id} className={a.is_active ? '' : 'opacity-50'}>
                       <td className="w-16 text-slate-400">{a.code}</td>
-                      <td>
-                        <div className="font-medium">
-                          {a.parent_id ? '↳ ' : ''}
+                      <td style={{ paddingLeft: `${0.75 + depth * 1.25}rem` }}>
+                        <div className="flex items-center gap-1 font-medium">
+                          {hasChildren ? (
+                            <button className="-ml-1 rounded p-0.5 text-slate-500 hover:bg-slate-100" onClick={() => toggle(a.id)} aria-label={collapsed.has(a.id) ? 'Expand' : 'Collapse'}>
+                              {collapsed.has(a.id) ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                            </button>
+                          ) : depth > 0 ? (
+                            <span className="text-slate-300">↳</span>
+                          ) : null}
                           <Link
                             to={`/accounts/${a.id}`}
                             className="hover:text-indigo-600 hover:underline"
@@ -85,7 +108,8 @@ export default function Accounts() {
                         <div className="text-xs text-slate-500">{subtypeLabel(a.subtype)}{a.institution ? ` · ${a.institution}` : ''}</div>
                       </td>
                       <td className="num">
-                        <Money cents={a.balance} />
+                        <Money cents={sum} className={hasChildren ? 'font-semibold' : ''} />
+                        {hasChildren && <div className="text-[11px] font-normal text-slate-400">{a.balance ? `own ${cad(a.balance)} + subs` : 'incl. sub-accounts'}</div>}
                       </td>
                       <td className="w-36 whitespace-nowrap text-right">
                         <button className="btn-ghost px-1" onClick={() => move(a, -1)} aria-label="Move up">

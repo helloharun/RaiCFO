@@ -354,6 +354,24 @@ describe('hardening', () => {
     expect((await req('/api/planning/forecast?days=99999', { cookie: s.cookie })).res.status).toBe(400);
     expect((await req('/api/planning/debt', { cookie: s.cookie, csrf: s.csrf, body: { extraMonthly: 100 } })).res.status).toBe(200);
   });
+
+  it('validates sub-account parents and lists cash held in investment accounts', async () => {
+    const mk = async (body: Record<string, unknown>) => req('/api/accounts', { cookie: s.cookie, csrf: s.csrf, body: { currency: 'CAD', ...body } });
+    const parent = await mk({ name: 'Wealthsimple', type: 'asset', subtype: 'other_investment' });
+    expect(parent.res.status, parent.text).toBe(200);
+    const tfsa = await mk({ name: 'WS TFSA', type: 'asset', subtype: 'tfsa', parentId: parent.json.id });
+    expect(tfsa.res.status, tfsa.text).toBe(200);
+    expect((await mk({ name: 'Bad', type: 'expense', subtype: (await req('/api/meta', { cookie: s.cookie })).json.subtypes.expense[0], parentId: parent.json.id })).res.status).toBe(400);
+    const cycle = await req(`/api/accounts/${parent.json.id}`, { method: 'PUT', cookie: s.cookie, csrf: s.csrf, body: { parentId: tfsa.json.id } });
+    expect(cycle.res.status).toBe(400);
+    expect(cycle.json.error).toMatch(/under itself/);
+    const bank = (await db.prepare("SELECT id FROM accounts WHERE code = '1010'").get() as { id: number }).id;
+    expect((await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, body: { date: '2026-01-20', description: 'Fund TFSA', lines: [{ accountId: tfsa.json.id, debit: 192.45 }, { accountId: bank, credit: 192.45 }] } })).res.status).toBe(200);
+    const inv = await req('/api/investments?asOf=2026-12-31', { cookie: s.cookie });
+    const row = inv.json.accounts.find((a: { id: number }) => a.id === tfsa.json.id);
+    expect(row).toMatchObject({ balance: 19245, cash: 19245, total: 19245 });
+    expect(inv.json.totalCash).toBeGreaterThanOrEqual(19245);
+  });
 });
 
 describe('helpers', () => {

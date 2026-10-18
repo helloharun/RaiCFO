@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, cad, today } from '../api';
+import { api, cad, subtypeLabel, today } from '../api';
 import { Empty, ErrorBox, Money, PageHeader, Stat, useApi } from '../components/ui';
 
 interface Holding { accountId: number; accountName: string; securityId: number; symbol: string; name: string | null; currency: string; quantity: number; cost: number; avgCost: number; lastPrice: number | null; priceDate: string | null; marketValue: number | null; unrealizedGain: number | null }
 
 export default function Investments() {
-  const { data, reload } = useApi<{ holdings: Holding[]; totalCost: number; totalMarket: number; unrealizedGain: number; realizedGainYtd: number; investmentIncomeYtd: number }>('/investments');
+  const { data, reload } = useApi<{ holdings: Holding[]; accounts: Array<{ id: number; code: string; name: string; subtype: string; balance: number; cash: number; holdingsValue: number; total: number }>; totalCash: number; totalValue: number; totalCost: number; totalMarket: number; unrealizedGain: number; realizedGainYtd: number; investmentIncomeYtd: number }>('/investments');
   const [error, setError] = useState<string | null>(null);
   const setPrice = async (h: Holding, price: string) => {
     try {
@@ -23,12 +23,40 @@ export default function Investments() {
       {data && (
         <>
           <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat label="Market value" value={cad(data.totalMarket)} sub={`Book cost ${cad(data.totalCost)}`} />
+            <Stat label="Total in investment accounts" value={cad(data.totalValue)} sub={`Cash ${cad(data.totalCash)} · holdings ${cad(data.totalMarket)} (cost ${cad(data.totalCost)})`} />
             <Stat label="Unrealized gain" value={cad(data.unrealizedGain)} tone={data.unrealizedGain >= 0 ? 'good' : 'bad'} sub={data.totalCost ? `${((data.unrealizedGain / data.totalCost) * 100).toFixed(2)}%` : undefined} />
             <Stat label="Realized gains (YTD)" value={cad(data.realizedGainYtd)} />
             <Stat label="Dividends & interest (YTD)" value={cad(data.investmentIncomeYtd)} />
           </div>
+          <div className="card mb-4 overflow-x-auto">
+            <div className="border-b px-4 py-3 text-sm font-semibold">Investment accounts</div>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th className="num">Cash</th>
+                  <th className="num">Holdings</th>
+                  <th className="num">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.accounts.map((a) => (
+                  <tr key={a.id}>
+                    <td>
+                      <Link to={`/accounts/${a.id}`} className="font-medium hover:text-indigo-600 hover:underline">{a.name}</Link>
+                      <div className="text-xs text-slate-500">{a.code} · {subtypeLabel(a.subtype)}</div>
+                    </td>
+                    <td className="num">{cad(a.cash)}</td>
+                    <td className="num">{cad(a.holdingsValue)}</td>
+                    <td className="num font-semibold">{cad(a.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!data.accounts.length && <Empty>No TFSA, RRSP or investment accounts yet.</Empty>}
+          </div>
           <div className="card overflow-x-auto">
+            <div className="border-b px-4 py-3 text-sm font-semibold">Holdings (shares, ETFs, funds)</div>
             <table className="table">
               <thead>
                 <tr>
@@ -63,7 +91,7 @@ export default function Investments() {
                 ))}
               </tbody>
             </table>
-            {!data.holdings.length && <Empty>No holdings yet.</Empty>}
+            {!data.holdings.length && <Empty>No holdings yet. Cash moved into an account shows above; record a purchase to track shares.</Empty>}
           </div>
         </>
       )}

@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { DB } from '../db.js';
 import { fromCents, isValidISODate, monthStart, toCents, todayISO } from '../money.js';
-import { type EntryInput, SUBTYPES, TRANSACTION_TYPES, ValidationError } from '../types.js';
+import { type EntryInput, INVESTMENT_SUBTYPES, SUBTYPES, TRANSACTION_TYPES, ValidationError } from '../types.js';
 import {
   USER_ID, accountBalances, audit, getAccount, getEntry, getSetting, listAccounts, listEntries, postEntry, reverseEntry, setSetting, validateEntry,
 } from '../engine/ledger.js';
@@ -108,12 +108,31 @@ export function apiRouter(db: DB) {
     };
   };
 
+  const checkParent = async (parentId: number | null, type: string, selfId?: number) => {
+    if (parentId === null) return;
+    if (!Number.isSafeInteger(parentId) || parentId <= 0) throw new ValidationError('Invalid parent account.');
+    let cur = await getAccount(db, parentId);
+    if (!cur) throw new ValidationError('Parent account not found.');
+    if (cur.type !== type) throw new ValidationError('A sub-account must have the same type as its parent.');
+    for (let n = 0; cur && n < 50; n++) {
+      if (cur.id === selfId) throw new ValidationError('An account cannot be placed under itself or one of its own sub-accounts.');
+      cur = cur.parent_id ? await getAccount(db, cur.parent_id) : undefined;
+    }
+  };
+
   r.post('/accounts', h(async (req) => {
     const f = accountFields(req.body);
+    await checkParent(f.parent_id, f.type);
     if (!f.code) {
       const prefix = { asset: 1, liability: 2, equity: 3, income: 4, expense: 5 }[f.type as 'asset'];
-      const max = await db.prepare("SELECT MAX(CASE WHEN code ~ '^[0-9]+$' THEN CAST(code AS BIGINT) END) AS m FROM accounts WHERE user_id = ? AND code LIKE ?").get(USER_ID, `${prefix}%`) as { m: number | null };
-      f.code = String((max.m ?? prefix * 1000) + 5);
+      const used = new Set(((await db.prepare("SELECT code FROM accounts WHERE user_id = ? AND code ~ '^[0-9]{4}$' AND code LIKE ?").all(USER_ID, `${prefix}%`)) as Array<{ code: string }>).map((x) => Number(x.code)));
+      const lo = prefix * 1000;
+      const hi = lo + 999;
+      const top = Math.max(lo, ...used);
+      let next = top + 5 <= hi ? top + 5 : lo;
+      while (used.has(next) && next <= hi) next++;
+      if (next > hi) throw new ValidationError('No free account code left in this range; enter a code manually.');
+      f.code = String(next);
     }
     if (await db.prepare('SELECT 1 FROM accounts WHERE user_id = ? AND code = ?').get(USER_ID, f.code)) throw new ValidationError(`Account code ${f.code} is already used.`);
     const newId = Number(
@@ -130,7 +149,8 @@ export function apiRouter(db: DB) {
     const f = accountFields({ ...a, parentId: a.parent_id, ...req.body }, a);
     const used = await db.prepare('SELECT 1 FROM journal_lines WHERE account_id = ? LIMIT 1').get(a.id);
     if (used && f.type !== a.type) throw new ValidationError('The type of an account with transactions cannot be changed. Create a new account instead.');
-    if (f.parent_id === a.id) throw new ValidationError('An account cannot be its own parent.');
+    await checkParent(f.parent_id, f.type, a.id);
+    if (f.type !== a.type && await db.prepare('SELECT 1 FROM accounts WHERE parent_id = ? LIMIT 1').get(a.id)) throw new ValidationError('Move or remove its sub-accounts before changing the type of this account.');
     if (f.code && f.code !== a.code && await db.prepare('SELECT 1 FROM accounts WHERE user_id = ? AND code = ?').get(USER_ID, f.code)) throw new ValidationError(`Account code ${f.code} is already used.`);
     await db.prepare("UPDATE accounts SET code = ?, name = ?, type = ?, subtype = ?, currency = ?, parent_id = ?, institution = ?, aliases = ?, description = ?, updated_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?")
       .run(f.code || a.code, f.name, f.type, f.subtype, f.currency, f.parent_id, f.institution, f.aliases, f.description, a.id);
@@ -348,7 +368,18 @@ export function apiRouter(db: DB) {
     const income = (await db
       .prepare(`SELECT COALESCE(SUM(l.credit - l.debit),0) AS g FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id JOIN accounts a ON a.id = l.account_id WHERE a.subtype IN ('dividend','interest') AND a.type='income' AND e.user_id = ? AND e.date >= ? AND e.date <= ?`)
       .get(USER_ID, `${asOf.slice(0, 4)}-01-01`, asOf)) as { g: number };
-    return { asOf, holdings: hs, totalCost, totalMarket, unrealizedGain: totalMarket - totalCost, realizedGainYtd: realized.g, investmentIncomeYtd: income.g };
+    const bal = await accountBalances(db, { to: asOf });
+    const accounts = (await listAccounts(db))
+      .filter((a) => a.type === 'asset' && INVESTMENT_SUBTYPES.includes(a.subtype) && (a.is_active || bal.get(a.id)?.balance))
+      .map((a) => {
+        const own = hs.filter((x) => x.accountId === a.id);
+        const balance = bal.get(a.id)?.balance ?? 0;
+        const cash = balance - own.reduce((s, x) => s + x.cost, 0);
+        const holdingsValue = own.reduce((s, x) => s + (x.marketValue ?? x.cost), 0);
+        return { id: a.id, code: a.code, name: a.name, subtype: a.subtype, balance, cash, holdingsValue, total: cash + holdingsValue };
+      });
+    const totalCash = accounts.reduce((s, a) => s + a.cash, 0);
+    return { asOf, holdings: hs, accounts, totalCash, totalValue: totalCash + totalMarket, totalCost, totalMarket, unrealizedGain: totalMarket - totalCost, realizedGainYtd: realized.g, investmentIncomeYtd: income.g };
   }));
   r.get('/securities', h(async () => await db.prepare('SELECT * FROM securities WHERE user_id = ? ORDER BY symbol').all(USER_ID)));
   r.put('/securities/:id', h(async (req) => {
