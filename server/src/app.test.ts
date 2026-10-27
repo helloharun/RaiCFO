@@ -431,6 +431,47 @@ describe('hardening', () => {
     expect((await req(`/api/contribution-plans/${fhsa}`, { method: 'DELETE', cookie: s.cookie, csrf: s.csrf })).res.status).toBe(200);
     expect((await req('/api/contribution-plans?year=2030', { cookie: s.cookie })).json.plans.some((p: { id: number }) => p.id === fhsa)).toBe(false);
   });
+
+  it('detects recurring expenses and break-even from the ledger', async () => {
+    const code = async (c: string) => (await db.prepare('SELECT id FROM accounts WHERE code = ?').get(c) as { id: number }).id;
+    const bank = await code('1010');
+    const rentAcct = await code('5010');
+    const groceries = await code('5100');
+    const salary = await code('4000');
+    const card = await code('2000');
+    const post = async (date: string, dr: number, cr: number, amt: number, payee: string) => {
+      const r = await req('/api/journal', { cookie: s.cookie, csrf: s.csrf, body: { date, description: 'rt', payee, lines: [{ accountId: dr, debit: amt }, { accountId: cr, credit: amt }] } });
+      expect(r.res.status, r.text).toBe(200);
+    };
+    for (const d of ['2026-07-05', '2026-08-05', '2026-09-05', '2026-10-04']) await post(d, rentAcct, bank, 1800, 'RT Landlord');
+    for (const d of ['2026-07-15', '2026-08-15', '2026-09-15']) await post(d, groceries, bank, 65.45, 'RT Freedom');
+    for (const [d, a] of [['2026-07-10', 200], ['2026-08-10', 300], ['2026-09-10', 250]] as const) await post(d, groceries, bank, a, 'RT Market');
+    await post('2025-11-15', await code('5310'), bank, 1200, 'RT InsureCo');
+    await post('2026-10-20', await code('5310'), bank, 1200, 'RT InsureCo');
+    for (const d of ['2026-07-31', '2026-08-31', '2026-09-30']) await post(d, bank, salary, 5000, 'Employer');
+    await post('2026-09-15', card, bank, 200, 'Card payment');
+
+    const r = await req('/api/planning/recurring-expenses', { cookie: s.cookie });
+    expect(r.res.status, r.text).toBe(200);
+    const fixed = r.json.fixed as Array<{ key: string; label: string; monthly: number }>;
+    expect(fixed.find((x) => x.label === 'RT Landlord')).toMatchObject({ monthly: 180000 });
+    expect(fixed.find((x) => x.label === 'RT Freedom')).toMatchObject({ monthly: 6545 });
+    expect(fixed.find((x) => x.label === 'RT InsureCo')).toMatchObject({ monthly: 10000 });
+    expect((r.json.habit as Array<{ label: string; monthly: number }>).find((x) => x.label === 'Groceries')?.monthly).toBeGreaterThan(0);
+    expect(r.json.debtMonthly).toBeGreaterThan(0);
+    expect(r.json.incomeMonthly).toBeGreaterThan(0);
+    expect(r.json.totalMonthly).toBeGreaterThanOrEqual(180000 + 6545 + 10000);
+    expect(typeof r.json.leftoverMonthly).toBe('number');
+
+    const h = await req('/api/planning/recurring-expenses/hidden', { method: 'PUT', cookie: s.cookie, csrf: s.csrf, body: { key: 'm:RT Landlord', hidden: true } });
+    expect(h.res.status, h.text).toBe(200);
+    const r2 = await req('/api/planning/recurring-expenses', { cookie: s.cookie });
+    expect((r2.json.fixed as Array<{ label: string }>).some((x) => x.label === 'RT Landlord')).toBe(false);
+    expect(r2.json.hiddenCount).toBeGreaterThanOrEqual(1);
+    await req('/api/planning/recurring-expenses/hidden', { method: 'PUT', cookie: s.cookie, csrf: s.csrf, body: { key: '*', hidden: false } });
+    expect((await req('/api/planning/recurring-expenses', { cookie: s.cookie })).json.hiddenCount).toBe(0);
+    expect((await req('/api/planning/recurring-expenses/hidden', { method: 'PUT', cookie: s.cookie, csrf: s.csrf, body: { key: 'bogus' } })).res.status).toBe(400);
+  });
 });
 
 describe('helpers', () => {

@@ -3,6 +3,7 @@ import { AlertTriangle } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api, cad } from '../api';
 import { ErrorBox, Empty, Money, Notice, PageHeader, Stat, Tabs, useApi } from '../components/ui';
+import RecurringExpenses from '../components/RecurringExpenses';
 
 interface Forecast {
   from: string;
@@ -91,6 +92,7 @@ function ForecastView() {
           </div>
         </>
       )}
+      <RecurringExpenses />
     </div>
   );
 }
